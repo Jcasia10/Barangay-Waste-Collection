@@ -1,0 +1,1646 @@
+import 'package:exam/services/admin_dashboard_service.dart';
+import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+class DetailsScreen extends StatefulWidget {
+  const DetailsScreen({
+    required this.barangayId,
+    required this.barangayName,
+    required this.district,
+    required this.city,
+    required this.onLogout,
+    super.key,
+  });
+
+  final int barangayId;
+  final String barangayName;
+  final String district;
+  final String city;
+  final VoidCallback onLogout;
+
+  @override
+  State<DetailsScreen> createState() => _DetailsScreenState();
+}
+
+class _DetailsScreenState extends State<DetailsScreen> {
+  final AdminDashboardService _service = AdminDashboardService();
+  RealtimeChannel? _schedulesChannel;
+  static const List<String> _dayOfWeekOptions = <String>[
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+    'Sunday',
+  ];
+  static const List<String> _wasteTypeOptions = <String>[
+    'Recyclable',
+    'Biodegradable',
+    'Non-Biodegradable',
+  ];
+  static const List<String> _collectionLogStatuses = <String>[
+    'pending',
+    'completed',
+    'missed',
+  ];
+
+  late Future<List<CollectionLogItem>> _logsFuture;
+  late Future<List<ResidentReportItem>> _reportsFuture;
+  late Future<List<CollectionScheduleItem>> _schedulesFuture;
+  late Future<List<String>> _collectionPhotosFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _reloadData();
+    _subscribeToScheduleChanges();
+  }
+
+  void _reloadData() {
+    _logsFuture = _service.fetchBarangayLogs(widget.barangayId);
+    _reportsFuture = _service.fetchResidentReports(widget.barangayId);
+    _schedulesFuture = _service.fetchSchedules(widget.barangayId);
+    _collectionPhotosFuture = _service.fetchCollectionPhotos(limit: 8);
+  }
+
+  Future<void> _refreshAll() async {
+    setState(_reloadData);
+    await Future.wait([
+      _logsFuture,
+      _reportsFuture,
+      _schedulesFuture,
+      _collectionPhotosFuture,
+    ]);
+  }
+
+  Future<void> _refreshSchedules() async {
+    setState(() {
+      _schedulesFuture = _service.fetchSchedules(widget.barangayId);
+    });
+    await _schedulesFuture;
+  }
+
+  Future<void> _refreshLogs() async {
+    setState(() {
+      _logsFuture = _service.fetchBarangayLogs(widget.barangayId);
+    });
+    await _logsFuture;
+  }
+
+  Future<void> _updateCollectionLogStatus(
+    CollectionLogItem log,
+    String status,
+  ) async {
+    try {
+      await _service.updateCollectionLogStatus(logId: log.id, status: status);
+      if (!mounted) {
+        return;
+      }
+      await _refreshLogs();
+    } on PostgrestException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            error.message.isNotEmpty
+                ? error.message
+                : 'Unable to update collection log status.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Unable to update collection log status: $error'),
+        ),
+      );
+    }
+  }
+
+  Future<void> _refreshCollectionPhotos() async {
+    setState(() {
+      _collectionPhotosFuture = _service.fetchCollectionPhotos(limit: 8);
+    });
+    await _collectionPhotosFuture;
+  }
+
+  void _subscribeToScheduleChanges() {
+    final channelName = 'schedules-${widget.barangayId}';
+    _schedulesChannel = Supabase.instance.client.channel(channelName)
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.all,
+        schema: 'public',
+        table: 'collection_schedules',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'barangay_id',
+          value: '${widget.barangayId}',
+        ),
+        callback: (payload) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _schedulesFuture = _service.fetchSchedules(widget.barangayId);
+          });
+        },
+      )
+      ..subscribe();
+  }
+
+  @override
+  void dispose() {
+    if (_schedulesChannel != null) {
+      Supabase.instance.client.removeChannel(_schedulesChannel!);
+    }
+    super.dispose();
+  }
+
+  Future<void> _addSchedule() async {
+    await _openScheduleForm();
+  }
+
+  Future<void> _editSchedule(CollectionScheduleItem schedule) async {
+    await _openScheduleForm(schedule: schedule);
+  }
+
+  Future<void> _deleteSchedule(CollectionScheduleItem schedule) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Delete schedule?'),
+          content: Text(
+            'This will permanently remove the ${schedule.dayOfWeek} schedule.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) {
+      return;
+    }
+
+    try {
+      await _service.deleteSchedule(scheduleId: schedule.id);
+      if (!mounted) {
+        return;
+      }
+      await _refreshSchedules();
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Schedule deleted successfully.')),
+      );
+    } on PostgrestException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            error.message.isNotEmpty
+                ? error.message
+                : 'Unable to delete schedule.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Unable to delete schedule: $error')),
+      );
+    }
+  }
+
+  Future<void> _openScheduleForm({CollectionScheduleItem? schedule}) async {
+    final editingSchedule = schedule;
+    final isEditing = editingSchedule != null;
+    String? selectedDayOfWeek = editingSchedule?.dayOfWeek;
+    if (selectedDayOfWeek != null &&
+        !_dayOfWeekOptions.contains(selectedDayOfWeek)) {
+      selectedDayOfWeek = null;
+    }
+    final selectedWasteTypes = <String>{};
+    final existingWasteTypes = (editingSchedule?.wasteType ?? '')
+        .split(',')
+        .map((type) => type.trim())
+        .where((type) => type.isNotEmpty);
+    for (final existingType in existingWasteTypes) {
+      for (final option in _wasteTypeOptions) {
+        if (option.toLowerCase() == existingType.toLowerCase()) {
+          selectedWasteTypes.add(option);
+        }
+      }
+    }
+    final notesController = TextEditingController(
+      text: editingSchedule?.notes ?? '',
+    );
+    TimeOfDay? startTime = editingSchedule?.startTime;
+    TimeOfDay? endTime = editingSchedule?.endTime;
+    bool isActive = editingSchedule?.isActive ?? true;
+
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 12,
+                bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      isEditing ? 'Update schedule' : 'Create schedule',
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: selectedDayOfWeek,
+                      decoration: const InputDecoration(
+                        labelText: 'Day of week',
+                      ),
+                      items: _dayOfWeekOptions
+                          .map(
+                            (day) => DropdownMenuItem<String>(
+                              value: day,
+                              child: Text(day),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        setSheetState(() {
+                          selectedDayOfWeek = value;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () async {
+                              final picked = await showTimePicker(
+                                context: context,
+                                initialTime:
+                                    startTime ??
+                                    const TimeOfDay(hour: 8, minute: 0),
+                              );
+                              if (picked != null) {
+                                setSheetState(() {
+                                  startTime = picked;
+                                });
+                              }
+                            },
+                            icon: const Icon(Icons.schedule_outlined),
+                            label: Text(
+                              startTime == null
+                                  ? 'Set start time'
+                                  : 'Start: ${_formatTimeOfDay(startTime!)}',
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () async {
+                              final picked = await showTimePicker(
+                                context: context,
+                                initialTime:
+                                    endTime ??
+                                    const TimeOfDay(hour: 10, minute: 0),
+                              );
+                              if (picked != null) {
+                                setSheetState(() {
+                                  endTime = picked;
+                                });
+                              }
+                            },
+                            icon: const Icon(Icons.schedule_send_outlined),
+                            label: Text(
+                              endTime == null
+                                  ? 'Set end time'
+                                  : 'End: ${_formatTimeOfDay(endTime!)}',
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Waste type',
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    ..._wasteTypeOptions.map(
+                      (type) => CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        title: Text(type),
+                        value: selectedWasteTypes.contains(type),
+                        onChanged: (checked) {
+                          setSheetState(() {
+                            if (checked == true) {
+                              selectedWasteTypes.add(type);
+                            } else {
+                              selectedWasteTypes.remove(type);
+                            }
+                          });
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: notesController,
+                      minLines: 3,
+                      maxLines: 5,
+                      decoration: const InputDecoration(labelText: 'Notes'),
+                    ),
+                    const SizedBox(height: 12),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Active schedule'),
+                      subtitle: const Text(
+                        'Toggle whether this schedule is active.',
+                      ),
+                      value: isActive,
+                      onChanged: (value) {
+                        setSheetState(() {
+                          isActive = value;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.of(context).pop(false),
+                            child: const Text('Cancel'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: () async {
+                              final dayOfWeek = (selectedDayOfWeek ?? '')
+                                  .trim();
+                              final wasteType = selectedWasteTypes.join(', ');
+
+                              if (dayOfWeek.isEmpty || wasteType.isEmpty) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'Day of week and waste type are required.',
+                                    ),
+                                  ),
+                                );
+                                return;
+                              }
+
+                              if (startTime == null || endTime == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'Please select both start and end times.',
+                                    ),
+                                  ),
+                                );
+                                return;
+                              }
+
+                              try {
+                                if (isEditing) {
+                                  final onlyStatusChanged =
+                                      dayOfWeek == editingSchedule.dayOfWeek &&
+                                      wasteType == editingSchedule.wasteType &&
+                                      notesController.text.trim() ==
+                                          editingSchedule.notes.trim() &&
+                                      startTime == editingSchedule.startTime &&
+                                      endTime == editingSchedule.endTime &&
+                                      isActive != editingSchedule.isActive;
+
+                                  if (onlyStatusChanged) {
+                                    await _service.updateScheduleStatus(
+                                      scheduleId: editingSchedule.id,
+                                      isActive: isActive,
+                                    );
+                                  } else {
+                                    await _service.updateSchedule(
+                                      schedule: editingSchedule,
+                                      dayOfWeek: dayOfWeek,
+                                      startTime: startTime!,
+                                      endTime: endTime!,
+                                      wasteType: wasteType,
+                                      notes: notesController.text,
+                                      isActive: isActive,
+                                    );
+                                  }
+                                } else {
+                                  await _service.createSchedule(
+                                    barangayId: widget.barangayId,
+                                    dayOfWeek: dayOfWeek,
+                                    startTime: startTime!,
+                                    endTime: endTime!,
+                                    wasteType: wasteType,
+                                    notes: notesController.text,
+                                    isActive: isActive,
+                                  );
+                                }
+                                if (context.mounted) {
+                                  Navigator.of(context).pop(true);
+                                }
+                              } on PostgrestException catch (error) {
+                                if (!context.mounted) {
+                                  return;
+                                }
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      error.message.isNotEmpty
+                                          ? error.message
+                                          : 'Unable to save schedule.',
+                                    ),
+                                  ),
+                                );
+                              } catch (error) {
+                                if (!context.mounted) {
+                                  return;
+                                }
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      'Unable to save schedule: $error',
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
+                            child: Text(isEditing ? 'Save' : 'Create'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    notesController.dispose();
+
+    if (saved == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            schedule == null
+                ? 'Schedule created successfully.'
+                : 'Schedule updated successfully.',
+          ),
+        ),
+      );
+      await _refreshSchedules();
+      setState(() {});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.barangayName),
+        actions: [
+          IconButton(
+            tooltip: 'Log out',
+            onPressed: widget.onLogout,
+            icon: const Icon(Icons.logout),
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: _refreshAll,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+          children: [
+            _HeaderCard(
+              barangayName: widget.barangayName,
+              district: widget.district,
+              city: widget.city,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Collection completion and compliance',
+              style: theme.textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 10),
+            FutureBuilder<List<CollectionLogItem>>(
+              future: _logsFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const _SectionLoading();
+                }
+                if (snapshot.hasError) {
+                  return _SectionError(
+                    title: 'Collection logs unavailable',
+                    message: snapshot.error.toString(),
+                  );
+                }
+
+                final logs = snapshot.data ?? const <CollectionLogItem>[];
+                final summary = _buildSummary(logs);
+
+                return Column(
+                  children: [
+                    _CompletionSummaryCard(summary: summary),
+                    const SizedBox(height: 12),
+                    if (logs.isEmpty)
+                      const _EmptyInlineState(
+                        icon: Icons.inbox_outlined,
+                        title: 'No collection logs found',
+                        message:
+                            'This barangay does not have collection logs yet.',
+                      )
+                    else
+                      ...logs.map(
+                        (log) => Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: _CollectionLogCard(
+                            log: log,
+                            selectedStatus: _normalizeCollectionLogStatus(
+                              log.status,
+                            ),
+                            onStatusChanged: (value) =>
+                                _updateCollectionLogStatus(log, value),
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Resident reports',
+              style: theme.textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 10),
+            FutureBuilder<List<ResidentReportItem>>(
+              future: _reportsFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const _SectionLoading();
+                }
+                if (snapshot.hasError) {
+                  return _SectionError(
+                    title: 'Resident reports unavailable',
+                    message: snapshot.error.toString(),
+                  );
+                }
+
+                final reports = snapshot.data ?? const <ResidentReportItem>[];
+                if (reports.isEmpty) {
+                  return const _EmptyInlineState(
+                    icon: Icons.report_outlined,
+                    title: 'No resident reports found',
+                    message:
+                        'Resident reports linked to this barangay will appear here.',
+                  );
+                }
+
+                return Column(
+                  children: reports
+                      .map(
+                        (report) => Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: _ResidentReportCard(report: report),
+                        ),
+                      )
+                      .toList(),
+                );
+              },
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Collection photos',
+                    style: theme.textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Refresh photos',
+                  onPressed: _refreshCollectionPhotos,
+                  icon: const Icon(Icons.refresh),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            FutureBuilder<List<String>>(
+              future: _collectionPhotosFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const _SectionLoading();
+                }
+                if (snapshot.hasError) {
+                  return _SectionError(
+                    title: 'Collection photos unavailable',
+                    message: snapshot.error.toString(),
+                  );
+                }
+
+                final photos = snapshot.data ?? const <String>[];
+                if (photos.isEmpty) {
+                  return const _EmptyInlineState(
+                    icon: Icons.photo_library_outlined,
+                    title: 'No collection photos found',
+                    message:
+                        'Add image files to your Supabase storage buckets to display them here.',
+                  );
+                }
+
+                return _PhotoCarousel(photoUrls: photos);
+              },
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Schedules',
+              style: theme.textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.icon(
+                onPressed: _addSchedule,
+                icon: const Icon(Icons.add),
+                label: const Text('Add schedule'),
+              ),
+            ),
+            const SizedBox(height: 10),
+            FutureBuilder<List<CollectionScheduleItem>>(
+              future: _schedulesFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const _SectionLoading();
+                }
+                if (snapshot.hasError) {
+                  return _SectionError(
+                    title: 'Schedules unavailable',
+                    message: snapshot.error.toString(),
+                  );
+                }
+
+                final schedules =
+                    snapshot.data ?? const <CollectionScheduleItem>[];
+                if (schedules.isEmpty) {
+                  return const _EmptyInlineState(
+                    icon: Icons.calendar_month_outlined,
+                    title: 'No schedules found',
+                    message:
+                        'Create collection schedules for this barangay in Supabase.',
+                  );
+                }
+
+                return Column(
+                  children: schedules
+                      .map(
+                        (schedule) => Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: _ScheduleCard(
+                            schedule: schedule,
+                            onEditPressed: () => _editSchedule(schedule),
+                            onDeletePressed: () => _deleteSchedule(schedule),
+                          ),
+                        ),
+                      )
+                      .toList(),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  _CompletionSummary _buildSummary(List<CollectionLogItem> logs) {
+    final completedLogs = logs.where((log) => log.isCompleted).length;
+    final pendingLogs = logs.length - completedLogs;
+    final complianceRate = logs.isEmpty
+        ? 0.0
+        : (completedLogs / logs.length) * 100;
+    final latestLog = logs.isEmpty ? null : logs.first;
+
+    return _CompletionSummary(
+      totalLogs: logs.length,
+      completedLogs: completedLogs,
+      pendingLogs: pendingLogs,
+      complianceRate: complianceRate,
+      latestStatus: latestLog?.status ?? 'No logs yet',
+      latestDate: latestLog?.referenceDate,
+    );
+  }
+
+  String _normalizeCollectionLogStatus(String value) {
+    final normalized = value.trim().toLowerCase();
+    if (_collectionLogStatuses.contains(normalized)) {
+      return normalized;
+    }
+    return 'pending';
+  }
+}
+
+class _HeaderCard extends StatelessWidget {
+  const _HeaderCard({
+    required this.barangayName,
+    required this.district,
+    required this.city,
+  });
+
+  final String barangayName;
+  final String district;
+  final String city;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(28),
+        gradient: LinearGradient(
+          colors: [scheme.primary, scheme.secondary, scheme.tertiary],
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: const Icon(
+                  Icons.location_on_outlined,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  barangayName,
+                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            [
+              district,
+              city,
+            ].where((text) => text.trim().isNotEmpty).join(' • '),
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: Colors.white.withValues(alpha: 0.9),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Review collection performance, resident reports, and active schedules for this barangay.',
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: Colors.white.withValues(alpha: 0.92),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CompletionSummaryCard extends StatelessWidget {
+  const _CompletionSummaryCard({required this.summary});
+
+  final _CompletionSummary summary;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                '${summary.complianceRate.toStringAsFixed(1)}%',
+                style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  color: scheme.primary,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Completion rate',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    Text(
+                      summary.latestStatus,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              minHeight: 10,
+              value: summary.complianceRate.clamp(0, 100) / 100,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: _MetricTile(
+                  label: 'Completed',
+                  value: '${summary.completedLogs}',
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _MetricTile(
+                  label: 'Pending',
+                  value: '${summary.pendingLogs}',
+                ),
+              ),
+              const SizedBox(width: 19),
+              Expanded(
+                child: _MetricTile(
+                  label: 'Total logs',
+                  value: '${summary.totalLogs}',
+                ),
+              ),
+            ],
+          ),
+          if (summary.latestDate != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              'Latest log: ${_formatDate(summary.latestDate!)}',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricTile extends StatelessWidget {
+  const _MetricTile({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            value,
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CollectionLogCard extends StatelessWidget {
+  const _CollectionLogCard({
+    required this.log,
+    required this.selectedStatus,
+    required this.onStatusChanged,
+  });
+
+  final CollectionLogItem log;
+  final String selectedStatus;
+  final ValueChanged<String> onStatusChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${log.scheduleDayOfWeek.isEmpty ? 'Collection log' : log.scheduleDayOfWeek} • ${_formatDate(log.collectionDate)}',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '${log.scheduleWasteType.isEmpty ? 'Waste type not specified' : log.scheduleWasteType} • ${log.barangayName}',
+                ),
+                const SizedBox(height: 10),
+                Text(log.remarks.isEmpty ? 'No remarks provided.' : log.remarks),
+                const SizedBox(height: 8),
+                Text(
+                  'Time: ${_formatTimeOfDay(log.scheduleStartTime)} - ${_formatTimeOfDay(log.scheduleEndTime)}',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          SizedBox(
+            width: 130,
+            child: DropdownButtonFormField<String>(
+              initialValue: selectedStatus,
+              isDense: true,
+              iconSize: 18,
+              style: Theme.of(context).textTheme.labelSmall,
+              decoration: const InputDecoration(
+                labelText: 'Status',
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: 8,
+                  vertical: 8,
+                ),
+                border: OutlineInputBorder(),
+              ),
+              items: const [
+                DropdownMenuItem(value: 'pending', child: Text('Pending')),
+                DropdownMenuItem(value: 'completed', child: Text('Completed')),
+                DropdownMenuItem(value: 'missed', child: Text('Missed')),
+              ],
+              onChanged: (value) {
+                if (value == null || value == selectedStatus) {
+                  return;
+                }
+                onStatusChanged(value);
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ResidentReportCard extends StatefulWidget {
+  const _ResidentReportCard({required this.report});
+
+  final ResidentReportItem report;
+
+  @override
+  State<_ResidentReportCard> createState() => _ResidentReportCardState();
+}
+
+class _ResidentReportCardState extends State<_ResidentReportCard> {
+  final AdminDashboardService _service = AdminDashboardService();
+  late Future<String?> _photoUrlFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _photoUrlFuture = _service.resolveReportPhotoUrl(widget.report);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ResidentReportCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.report.id != widget.report.id) {
+      _photoUrlFuture = _service.resolveReportPhotoUrl(widget.report);
+    }
+  }
+
+  Future<void> _openPhotoViewer(String imageUrl) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return Dialog(
+          insetPadding: const EdgeInsets.all(16),
+          child: InteractiveViewer(
+            minScale: 0.8,
+            maxScale: 4,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                AspectRatio(
+                  aspectRatio: 1,
+                  child: Image.network(
+                    imageUrl,
+                    fit: BoxFit.contain,
+                    errorBuilder: (context, error, stackTrace) {
+                      return const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text('Unable to load photo.'),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: FilledButton.icon(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close),
+                    label: const Text('Close'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  widget.report.residentName,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              _StatusChip(label: widget.report.status),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            widget.report.addressText.isEmpty
+                ? widget.report.address
+                : widget.report.addressText,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            widget.report.description.isEmpty
+                ? 'No description provided.'
+                : widget.report.description,
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Contact: ${widget.report.phone.isEmpty ? 'No phone' : widget.report.phone} • ${widget.report.email.isEmpty ? 'No email' : widget.report.email}',
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+          if (widget.report.reviewNotes.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Review notes: ${widget.report.reviewNotes}',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ],
+          if (widget.report.hasPhoto) ...[
+            const SizedBox(height: 12),
+            FutureBuilder<String?>(
+              future: _photoUrlFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return Container(
+                    height: 180,
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerHighest.withValues(
+                        alpha: 0.45,
+                      ),
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: const Center(child: CircularProgressIndicator()),
+                  );
+                }
+
+                final imageUrl = snapshot.data;
+                if (imageUrl == null || imageUrl.isEmpty) {
+                  return Container(
+                    height: 180,
+                    width: double.infinity,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerHighest.withValues(
+                        alpha: 0.35,
+                      ),
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: const Text('Photo not available in storage yet.'),
+                  );
+                }
+
+                return InkWell(
+                  borderRadius: BorderRadius.circular(18),
+                  onTap: () => _openPhotoViewer(imageUrl),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: scheme.outlineVariant.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(18),
+                      child: Stack(
+                        children: [
+                          AspectRatio(
+                            aspectRatio: 16 / 9,
+                            child: Image.network(
+                              imageUrl,
+                              fit: BoxFit.cover,
+                              errorBuilder: (context, error, stackTrace) {
+                                return Container(
+                                  color: scheme.surfaceContainerHighest
+                                      .withValues(alpha: 0.35),
+                                  alignment: Alignment.center,
+                                  child: const Text('Unable to load photo.'),
+                                );
+                              },
+                            ),
+                          ),
+                          Positioned(
+                            right: 12,
+                            top: 12,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.55),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                              child: const Text(
+                                'View photo',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ScheduleCard extends StatelessWidget {
+  const _ScheduleCard({
+    required this.schedule,
+    required this.onEditPressed,
+    required this.onDeletePressed,
+  });
+
+  final CollectionScheduleItem schedule;
+  final VoidCallback onEditPressed;
+  final VoidCallback onDeletePressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  schedule.dayOfWeek,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              _StatusChip(label: schedule.isActive ? 'Active' : 'Inactive'),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text('${schedule.barangayName} • ${schedule.city}'),
+          const SizedBox(height: 8),
+          Text(
+            '${schedule.wasteType.isEmpty ? 'Waste type not set' : schedule.wasteType} | ${_formatTimeOfDay(schedule.startTime)} - ${_formatTimeOfDay(schedule.endTime)}',
+          ),
+          const SizedBox(height: 8),
+          Text(schedule.notes.isEmpty ? 'No notes provided.' : schedule.notes),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              FilledButton.tonalIcon(
+                onPressed: onEditPressed,
+                icon: const Icon(Icons.edit_outlined),
+                label: const Text('Update'),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.tonalIcon(
+                onPressed: onDeletePressed,
+                icon: const Icon(Icons.delete_outline),
+                label: const Text('Delete'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PhotoCarousel extends StatefulWidget {
+  const _PhotoCarousel({required this.photoUrls});
+
+  final List<String> photoUrls;
+
+  @override
+  State<_PhotoCarousel> createState() => _PhotoCarouselState();
+}
+
+class _PhotoCarouselState extends State<_PhotoCarousel> {
+  late final PageController _pageController;
+  int _currentIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _pageController = PageController(viewportFraction: 0.82);
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      children: [
+        SizedBox(
+          height: 170,
+          child: PageView.builder(
+            controller: _pageController,
+            itemCount: widget.photoUrls.length,
+            onPageChanged: (value) {
+              setState(() {
+                _currentIndex = value;
+              });
+            },
+            itemBuilder: (context, index) {
+              final imageUrl = widget.photoUrls[index];
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: Container(
+                    color: scheme.surfaceContainerHighest.withValues(
+                      alpha: 0.4,
+                    ),
+                    child: Image.network(
+                      imageUrl,
+                      fit: BoxFit.contain,
+                      errorBuilder: (context, error, stackTrace) {
+                        return Center(
+                          child: Text(
+                            'Unable to load image',
+                            style: Theme.of(context).textTheme.bodySmall,
+                            textAlign: TextAlign.center,
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: List.generate(
+            widget.photoUrls.length,
+            (index) => AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              width: _currentIndex == index ? 16 : 6,
+              height: 6,
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              decoration: BoxDecoration(
+                color: _currentIndex == index
+                    ? scheme.primary
+                    : scheme.outlineVariant,
+                borderRadius: BorderRadius.circular(99),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _StatusChip extends StatelessWidget {
+  const _StatusChip({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final normalized = label.toLowerCase();
+    final backgroundColor =
+        normalized.contains('active') || normalized.contains('complete')
+        ? Colors.green.withValues(alpha: 0.15)
+        : normalized.contains('pending') || normalized.contains('inactive')
+        ? Colors.orange.withValues(alpha: 0.15)
+        : Colors.blue.withValues(alpha: 0.15);
+    final foregroundColor =
+        normalized.contains('active') || normalized.contains('complete')
+        ? Colors.green.shade800
+        : normalized.contains('pending') || normalized.contains('inactive')
+        ? Colors.orange.shade800
+        : Colors.blue.shade800;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: backgroundColor,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: Theme.of(context).textTheme.labelMedium?.copyWith(
+          color: foregroundColor,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionLoading extends StatelessWidget {
+  const _SectionLoading();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      height: 140,
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(24),
+      ),
+    );
+  }
+}
+
+class _SectionError extends StatelessWidget {
+  const _SectionError({required this.title, required this.message});
+
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.red.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 8),
+          Text(message),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmptyInlineState extends StatelessWidget {
+  const _EmptyInlineState({
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.5)),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, size: 38, color: scheme.primary),
+          const SizedBox(height: 10),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CompletionSummary {
+  const _CompletionSummary({
+    required this.totalLogs,
+    required this.completedLogs,
+    required this.pendingLogs,
+    required this.complianceRate,
+    required this.latestStatus,
+    required this.latestDate,
+  });
+
+  final int totalLogs;
+  final int completedLogs;
+  final int pendingLogs;
+  final double complianceRate;
+  final String latestStatus;
+  final DateTime? latestDate;
+}
+
+String _formatDate(DateTime value) {
+  final local = value.toLocal();
+  final day = local.day.toString().padLeft(2, '0');
+  final month = local.month.toString().padLeft(2, '0');
+  final year = local.year;
+  return '$day/$month/$year';
+}
+
+String _formatTimeOfDay(TimeOfDay? value) {
+  if (value == null) {
+    return '--:--';
+  }
+
+  final hour = value.hour.toString().padLeft(2, '0');
+  final minute = value.minute.toString().padLeft(2, '0');
+  return '$hour:$minute';
+}
