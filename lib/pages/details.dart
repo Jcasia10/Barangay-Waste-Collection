@@ -967,24 +967,20 @@ class _DetailsScreenState extends State<DetailsScreen> {
                             'Try a different search keyword or status filter.',
                       )
                     else
-                      ...visibleReports
-                          .map(
-                            (report) => Padding(
-                              padding: const EdgeInsets.only(bottom: 12),
-                              child: _ResidentReportCard(
-                                report: report,
-                                selectedStatus: _normalizeResidentReportStatus(
-                                  report.status,
-                                ),
-                                isUpdating: _updatingReportIds.contains(
-                                  report.id,
-                                ),
-                                onStatusChanged: (value) =>
-                                    _updateResidentReportStatus(report, value),
-                              ),
+                      ...visibleReports.map(
+                        (report) => Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: _ResidentReportCard(
+                            report: report,
+                            selectedStatus: _normalizeResidentReportStatus(
+                              report.status,
                             ),
-                          )
-                          .toList(),
+                            isUpdating: _updatingReportIds.contains(report.id),
+                            onStatusChanged: (value) =>
+                                _updateResidentReportStatus(report, value),
+                          ),
+                        ),
+                      ),
                     if (filteredReports.length > _initialVisibleCount)
                       Align(
                         alignment: Alignment.centerLeft,
@@ -1156,19 +1152,16 @@ class _DetailsScreenState extends State<DetailsScreen> {
                             'Try a different search keyword or status filter.',
                       )
                     else
-                      ...visibleSchedules
-                          .map(
-                            (schedule) => Padding(
-                              padding: const EdgeInsets.only(bottom: 12),
-                              child: _ScheduleCard(
-                                schedule: schedule,
-                                onEditPressed: () => _editSchedule(schedule),
-                                onDeletePressed: () =>
-                                    _deleteSchedule(schedule),
-                              ),
-                            ),
-                          )
-                          .toList(),
+                      ...visibleSchedules.map(
+                        (schedule) => Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: _ScheduleCard(
+                            schedule: schedule,
+                            onEditPressed: () => _editSchedule(schedule),
+                            onDeletePressed: () => _deleteSchedule(schedule),
+                          ),
+                        ),
+                      ),
                     if (filteredSchedules.length > _initialVisibleCount)
                       Align(
                         alignment: Alignment.centerLeft,
@@ -2011,7 +2004,7 @@ class _SearchAndFilterBar extends StatelessWidget {
     );
 
     final filterField = DropdownButtonFormField<String>(
-      value: filterValue,
+      initialValue: filterValue,
       isExpanded: true,
       decoration: InputDecoration(
         labelText: filterLabel,

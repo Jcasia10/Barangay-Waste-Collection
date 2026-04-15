@@ -398,27 +398,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 'Try a different keyword or status filter to find logs.',
                           )
                         else
-                          ...visibleLogs
-                              .map(
-                                (log) => Padding(
-                                  padding: const EdgeInsets.only(bottom: 10),
-                                  child: _RecentLogCard(
-                                    log: log,
-                                    onTap: () {
-                                      Navigator.of(context).pushNamed(
-                                        '/details',
-                                        arguments: {
-                                          'barangayId': log.barangayId,
-                                          'barangayName': log.barangayName,
-                                          'district': log.barangayDistrict,
-                                          'city': log.barangayCity,
-                                        },
-                                      );
+                          ...visibleLogs.map(
+                            (log) => Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: _RecentLogCard(
+                                log: log,
+                                onTap: () {
+                                  Navigator.of(context).pushNamed(
+                                    '/details',
+                                    arguments: {
+                                      'barangayId': log.barangayId,
+                                      'barangayName': log.barangayName,
+                                      'district': log.barangayDistrict,
+                                      'city': log.barangayCity,
                                     },
-                                  ),
-                                ),
-                              )
-                              .toList(),
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
                         if (filteredLogs.length > _initialVisibleCount)
                           Align(
                             alignment: Alignment.centerLeft,
@@ -536,27 +534,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 'Try a different keyword or status filter to find schedules.',
                           )
                         else
-                          ...visibleSchedules
-                              .map(
-                                (schedule) => Padding(
-                                  padding: const EdgeInsets.only(bottom: 10),
-                                  child: _SchedulePreviewCard(
-                                    schedule: schedule,
-                                    onTap: () {
-                                      Navigator.of(context).pushNamed(
-                                        '/details',
-                                        arguments: {
-                                          'barangayId': schedule.barangayId,
-                                          'barangayName': schedule.barangayName,
-                                          'district': schedule.district,
-                                          'city': schedule.city,
-                                        },
-                                      );
+                          ...visibleSchedules.map(
+                            (schedule) => Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: _SchedulePreviewCard(
+                                schedule: schedule,
+                                onTap: () {
+                                  Navigator.of(context).pushNamed(
+                                    '/details',
+                                    arguments: {
+                                      'barangayId': schedule.barangayId,
+                                      'barangayName': schedule.barangayName,
+                                      'district': schedule.district,
+                                      'city': schedule.city,
                                     },
-                                  ),
-                                ),
-                              )
-                              .toList(),
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
                         if (filteredSchedules.length > _initialVisibleCount)
                           Align(
                             alignment: Alignment.centerLeft,
@@ -705,7 +701,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                       },
                               ),
                             );
-                          }).toList(),
+                          }),
                         if (filteredReports.length > _initialVisibleCount)
                           Align(
                             alignment: Alignment.centerLeft,
@@ -780,7 +776,7 @@ class _SearchAndFilterBar extends StatelessWidget {
     );
 
     final filterField = DropdownButtonFormField<String>(
-      value: filterValue,
+      initialValue: filterValue,
       isExpanded: true,
       decoration: InputDecoration(
         labelText: filterLabel,
