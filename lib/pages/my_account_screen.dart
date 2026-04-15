@@ -12,7 +12,6 @@ class MyAccountScreen extends StatefulWidget {
 class _MyAccountScreenState extends State<MyAccountScreen> {
   final AdminDashboardService _service = AdminDashboardService();
   late Future<CurrentUserProfile> _profileFuture;
-  bool _isSavingProfile = false;
 
   @override
   void initState() {
@@ -28,139 +27,23 @@ class _MyAccountScreenState extends State<MyAccountScreen> {
   }
 
   Future<void> _openEditProfile(CurrentUserProfile profile) async {
-    final phoneController = TextEditingController(text: profile.phone);
-    final addressController = TextEditingController(text: profile.address);
-
     final saved = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setSheetState) {
-            return Padding(
-              padding: EdgeInsets.only(
-                left: 16,
-                right: 16,
-                top: 12,
-                bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-              ),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Edit profile',
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: phoneController,
-                      keyboardType: TextInputType.phone,
-                      decoration: const InputDecoration(labelText: 'Phone'),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: addressController,
-                      minLines: 2,
-                      maxLines: 3,
-                      decoration: const InputDecoration(labelText: 'Address'),
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: _isSavingProfile
-                                ? null
-                                : () => Navigator.of(context).pop(false),
-                            child: const Text('Cancel'),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: FilledButton(
-                            onPressed: _isSavingProfile
-                                ? null
-                                : () async {
-                                    setState(() {
-                                      _isSavingProfile = true;
-                                    });
-                                    setSheetState(() {});
-
-                                    try {
-                                      await _service.updateCurrentUserProfile(
-                                        phone: phoneController.text,
-                                        address: addressController.text,
-                                      );
-                                      if (!context.mounted) {
-                                        return;
-                                      }
-                                      Navigator.of(context).pop(true);
-                                    } on PostgrestException catch (error) {
-                                      if (!context.mounted) {
-                                        return;
-                                      }
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text(
-                                            error.message.isNotEmpty
-                                                ? error.message
-                                                : 'Unable to update profile.',
-                                          ),
-                                        ),
-                                      );
-                                    } catch (error) {
-                                      if (!context.mounted) {
-                                        return;
-                                      }
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text(
-                                            'Unable to update profile: $error',
-                                          ),
-                                        ),
-                                      );
-                                    } finally {
-                                      if (mounted) {
-                                        setState(() {
-                                          _isSavingProfile = false;
-                                        });
-                                        setSheetState(() {});
-                                      }
-                                    }
-                                  },
-                            child: _isSavingProfile
-                                ? const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Text('Save changes'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
+      builder: (_) => _EditProfileSheet(
+        initialPhone: profile.phone,
+        initialAddress: profile.address,
+        initialBarangayId: profile.barangayId,
+        loadBarangays: _service.fetchBarangayOptions,
+        onSave: (phone, address, barangayId) =>
+            _service.updateCurrentUserProfile(
+              phone: phone,
+              address: address,
+              barangayId: barangayId,
+            ),
+      ),
     );
-
-    phoneController.dispose();
-    addressController.dispose();
 
     if (saved == true && mounted) {
       await _refresh();
@@ -239,9 +122,7 @@ class _MyAccountScreenState extends State<MyAccountScreen> {
                 Align(
                   alignment: Alignment.centerRight,
                   child: FilledButton.icon(
-                    onPressed: _isSavingProfile
-                        ? null
-                        : () => _openEditProfile(profile),
+                    onPressed: () => _openEditProfile(profile),
                     icon: const Icon(Icons.edit_outlined),
                     label: const Text('Edit profile'),
                   ),
@@ -367,6 +248,206 @@ class _MyAccountScreenState extends State<MyAccountScreen> {
     final hour = local.hour.toString().padLeft(2, '0');
     final minute = local.minute.toString().padLeft(2, '0');
     return '${local.year}-$month-$day $hour:$minute';
+  }
+}
+
+class _EditProfileSheet extends StatefulWidget {
+  const _EditProfileSheet({
+    required this.initialPhone,
+    required this.initialAddress,
+    required this.initialBarangayId,
+    required this.loadBarangays,
+    required this.onSave,
+  });
+
+  final String initialPhone;
+  final String initialAddress;
+  final int? initialBarangayId;
+  final Future<List<BarangayRow>> Function() loadBarangays;
+  final Future<void> Function(String phone, String address, int? barangayId)
+  onSave;
+
+  @override
+  State<_EditProfileSheet> createState() => _EditProfileSheetState();
+}
+
+class _EditProfileSheetState extends State<_EditProfileSheet> {
+  late final TextEditingController _phoneController;
+  late final TextEditingController _addressController;
+  late Future<List<BarangayRow>> _barangaysFuture;
+  int? _selectedBarangayId;
+  bool _isSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _phoneController = TextEditingController(text: widget.initialPhone);
+    _addressController = TextEditingController(text: widget.initialAddress);
+    _selectedBarangayId = widget.initialBarangayId;
+    _barangaysFuture = widget.loadBarangays();
+  }
+
+  @override
+  void dispose() {
+    _phoneController.dispose();
+    _addressController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _saveChanges() async {
+    setState(() {
+      _isSaving = true;
+    });
+
+    try {
+      await widget.onSave(
+        _phoneController.text,
+        _addressController.text,
+        _selectedBarangayId,
+      );
+      if (!mounted) {
+        return;
+      }
+      Navigator.of(context).pop(true);
+    } on PostgrestException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            error.message.isNotEmpty
+                ? error.message
+                : 'Unable to update profile.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Unable to update profile: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 16,
+        right: 16,
+        top: 12,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Edit profile',
+              style: Theme.of(
+                context,
+              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _phoneController,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(labelText: 'Phone'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _addressController,
+              minLines: 2,
+              maxLines: 3,
+              decoration: const InputDecoration(labelText: 'Address'),
+            ),
+            const SizedBox(height: 12),
+            FutureBuilder<List<BarangayRow>>(
+              future: _barangaysFuture,
+              builder: (context, snapshot) {
+                final options = snapshot.data ?? const <BarangayRow>[];
+                final selectedExists = options.any(
+                  (item) => item.id == _selectedBarangayId,
+                );
+                final effectiveSelectedId = selectedExists
+                    ? _selectedBarangayId
+                    : null;
+
+                return DropdownButtonFormField<int?>(
+                  initialValue: effectiveSelectedId,
+                  isExpanded: true,
+                  decoration: InputDecoration(
+                    labelText: 'Barangay',
+                    helperText:
+                        snapshot.connectionState == ConnectionState.waiting
+                        ? 'Loading barangays...'
+                        : 'Select your barangay',
+                  ),
+                  items: [
+                    const DropdownMenuItem<int?>(
+                      value: null,
+                      child: Text('Not set'),
+                    ),
+                    ...options.map(
+                      (barangay) => DropdownMenuItem<int?>(
+                        value: barangay.id,
+                        child: Text(
+                          '${barangay.name} (${barangay.district.isEmpty ? 'No district' : barangay.district})',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                  ],
+                  onChanged: _isSaving
+                      ? null
+                      : (value) {
+                          setState(() {
+                            _selectedBarangayId = value;
+                          });
+                        },
+                );
+              },
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: _isSaving
+                        ? null
+                        : () => Navigator.of(context).pop(false),
+                    child: const Text('Cancel'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: _isSaving ? null : _saveChanges,
+                    child: _isSaving
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Save changes'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

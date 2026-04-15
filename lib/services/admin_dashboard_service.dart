@@ -252,6 +252,7 @@ class AdminDashboardService {
   Future<void> updateCurrentUserProfile({
     required String phone,
     required String address,
+    int? barangayId,
   }) async {
     final authUser = _client.auth.currentUser;
     if (authUser == null) {
@@ -261,9 +262,14 @@ class AdminDashboardService {
     final payload = <String, dynamic>{
       'phone': phone.trim(),
       'address': address.trim(),
+      'barangay_id': barangayId,
     };
 
     await _client.from(usersTable).update(payload).eq('id', authUser.id);
+  }
+
+  Future<List<BarangayRow>> fetchBarangayOptions() async {
+    return _fetchBarangays();
   }
 
   Future<String?> resolveReportPhotoUrl(ResidentReportItem report) async {
@@ -423,6 +429,21 @@ class AdminDashboardService {
         .from(collectionLogsTable)
         .update({'status': status.trim().toLowerCase()})
         .eq('id', logId);
+  }
+
+  Future<void> updateResidentReportStatus({
+    required dynamic reportId,
+    required String status,
+    String? reviewNotes,
+  }) async {
+    final normalizedStatus = status.trim().toLowerCase();
+    final payload = <String, dynamic>{
+      'status': normalizedStatus,
+      'review_notes': reviewNotes?.trim(),
+      'reviewed_by': _client.auth.currentUser?.id,
+    };
+
+    await _client.from(wasteReportsTable).update(payload).eq('id', reportId);
   }
 
   Future<void> deleteSchedule({required dynamic scheduleId}) async {

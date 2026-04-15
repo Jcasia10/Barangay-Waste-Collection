@@ -4,7 +4,9 @@ import 'dart:async';
 import 'package:exam/pages/dashboard_screen.dart';
 import 'package:exam/pages/details.dart';
 import 'package:exam/pages/my_account_screen.dart';
+import 'package:exam/services/web_session_guard.dart' as web_session_guard;
 import 'package:exam/services/web_theme_storage.dart' as web_theme_storage;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -62,10 +64,18 @@ Future<_AppBootstrapData> _buildBootstrap(SharedPreferences prefs) async {
   final client = Supabase.instance.client;
   var session = client.auth.currentSession;
 
-  // Enforce fresh login on app relaunch. Keep session only when returning from OAuth callback.
-  if (session != null && authIntentFromUrl == null) {
+  // Web-only behavior:
+  // - Keep session during page refresh (same tab session).
+  // - Clear session when tab/browser was fully closed and re-opened.
+  final isFreshWebSession =
+      kIsWeb && !web_session_guard.hasActiveWebSessionMarker();
+  if (session != null && authIntentFromUrl == null && isFreshWebSession) {
     await client.auth.signOut();
     session = null;
+  }
+
+  if (kIsWeb) {
+    web_session_guard.markWebSessionActive();
   }
 
   // If user is already authenticated (logged in before), automatically route to dashboard
@@ -169,6 +179,11 @@ class _WasteCollectionAppState extends State<WasteCollectionApp>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached && !kIsWeb) {
+      // Non-web: treat app termination as sign-out on close.
+      unawaited(Supabase.instance.client.auth.signOut());
+    }
+
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.hidden ||
@@ -230,6 +245,9 @@ class _WasteCollectionAppState extends State<WasteCollectionApp>
   }
 
   Future<void> _logoutAndShowAuth() async {
+    if (kIsWeb) {
+      web_session_guard.clearWebSessionMarker();
+    }
     await Supabase.instance.client.auth.signOut();
     await _saveRoute(_authRoute);
     _navigatorKey.currentState?.pushNamedAndRemoveUntil(

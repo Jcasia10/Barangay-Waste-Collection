@@ -12,22 +12,50 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   final AdminDashboardService _service = AdminDashboardService();
+  static const int _initialVisibleCount = 3;
+  static const double _backToTopOffset = 320;
+
   late Future<List<BarangaySummary>> _barangayFuture;
   late Future<List<CollectionLogItem>> _recentLogsFuture;
   late Future<List<CollectionScheduleItem>> _activeSchedulesFuture;
   late Future<List<ResidentReportItem>> _recentReportsFuture;
 
+  String _barangayQuery = '';
+  String _barangayFilter = 'All';
+  bool _showAllBarangays = false;
+  final TextEditingController _barangaySearchController =
+      TextEditingController();
+
+  String _logsQuery = '';
+  String _logsFilter = 'All';
+  bool _showAllLogs = false;
+  final TextEditingController _logsSearchController = TextEditingController();
+
+  String _scheduleQuery = '';
+  String _scheduleFilter = 'All';
+  bool _showAllSchedules = false;
+  final TextEditingController _scheduleSearchController =
+      TextEditingController();
+
+  String _reportQuery = '';
+  String _reportFilter = 'All';
+  bool _showAllReports = false;
+  final TextEditingController _reportSearchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  bool _showBackToTop = false;
+
   @override
   void initState() {
     super.initState();
     _loadDashboardData();
+    _scrollController.addListener(_onScrollChanged);
   }
 
   void _loadDashboardData() {
     _barangayFuture = _service.fetchBarangaySummaries();
-    _recentLogsFuture = _service.fetchRecentCollectionLogs(limit: 5);
-    _activeSchedulesFuture = _service.fetchActiveSchedules(limit: 5);
-    _recentReportsFuture = _service.fetchRecentReports(limit: 5);
+    _recentLogsFuture = _service.fetchRecentCollectionLogs(limit: 100);
+    _activeSchedulesFuture = _service.fetchActiveSchedules(limit: 100);
+    _recentReportsFuture = _service.fetchRecentReports(limit: 100);
   }
 
   Future<void> _reload() async {
@@ -40,6 +68,56 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _activeSchedulesFuture,
       _recentReportsFuture,
     ]);
+  }
+
+  @override
+  void dispose() {
+    _scrollController
+      ..removeListener(_onScrollChanged)
+      ..dispose();
+    _barangaySearchController.dispose();
+    _logsSearchController.dispose();
+    _scheduleSearchController.dispose();
+    _reportSearchController.dispose();
+    super.dispose();
+  }
+
+  void _onScrollChanged() {
+    final shouldShow =
+        _scrollController.hasClients &&
+        _scrollController.offset > _backToTopOffset;
+    if (shouldShow != _showBackToTop) {
+      setState(() {
+        _showBackToTop = shouldShow;
+      });
+    }
+  }
+
+  Future<void> _scrollToTop() async {
+    if (!_scrollController.hasClients) {
+      return;
+    }
+    await _scrollController.animateTo(
+      0,
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  List<T> _visibleItems<T>(List<T> items, {required bool showAll}) {
+    if (showAll) {
+      return items;
+    }
+    return items.take(_initialVisibleCount).toList();
+  }
+
+  bool _matchesQuery({required String query, required List<String> values}) {
+    final normalizedQuery = query.trim().toLowerCase();
+    if (normalizedQuery.isEmpty) {
+      return true;
+    }
+
+    return values.any((value) => value.toLowerCase().contains(normalizedQuery));
   }
 
   @override
@@ -58,6 +136,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ],
       ),
       drawer: _DashboardMenu(onLogout: widget.onLogout),
+      floatingActionButton: _showBackToTop
+          ? FloatingActionButton.extended(
+              onPressed: _scrollToTop,
+              icon: const Icon(Icons.keyboard_arrow_up),
+              label: const Text('Back to top'),
+            )
+          : null,
       body: RefreshIndicator(
         onRefresh: _reload,
         child: FutureBuilder<List<BarangaySummary>>(
@@ -90,10 +175,45 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         (sum, barangay) => sum + barangay.complianceRate,
                       ) /
                       barangays.length;
+            final barangayById = {
+              for (final barangay in barangays) barangay.id: barangay,
+            };
+            final districtOptions =
+                barangays
+                    .map((barangay) => barangay.district.trim())
+                    .where((district) => district.isNotEmpty)
+                    .toSet()
+                    .toList()
+                  ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+            final barangayFilterOptions = <String>['All', ...districtOptions];
+            final selectedBarangayFilter =
+                barangayFilterOptions.contains(_barangayFilter)
+                ? _barangayFilter
+                : 'All';
+            final filteredBarangays = barangays.where((barangay) {
+              final matchesQuery = _matchesQuery(
+                query: _barangayQuery,
+                values: [
+                  barangay.name,
+                  barangay.city,
+                  barangay.district,
+                  barangay.latestStatus,
+                ],
+              );
+              final matchesFilter =
+                  selectedBarangayFilter == 'All' ||
+                  barangay.district == selectedBarangayFilter;
+              return matchesQuery && matchesFilter;
+            }).toList();
+            final visibleBarangays = _visibleItems(
+              filteredBarangays,
+              showAll: _showAllBarangays,
+            );
 
             return ListView(
+              controller: _scrollController,
               physics: const AlwaysScrollableScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
               children: [
                 _HeroPanel(
                   totalBarangays: barangays.length,
@@ -109,6 +229,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                 ),
                 const SizedBox(height: 10),
+                _SearchAndFilterBar(
+                  searchHint: 'Search barangay, city, district, or status',
+                  searchController: _barangaySearchController,
+                  filterLabel: 'District',
+                  filterValue: selectedBarangayFilter,
+                  filterOptions: barangayFilterOptions,
+                  onSearchChanged: (value) {
+                    setState(() {
+                      _barangayQuery = value;
+                      _showAllBarangays = false;
+                    });
+                  },
+                  onFilterChanged: (value) {
+                    setState(() {
+                      _barangayFilter = value;
+                      _showAllBarangays = false;
+                    });
+                  },
+                ),
+                const SizedBox(height: 10),
                 if (barangays.isEmpty)
                   const _EmptyState(
                     icon: Icons.maps_home_work_outlined,
@@ -116,8 +256,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     message:
                         'Once Supabase starts returning collection logs, each barangay will appear here with a details button.',
                   )
+                else if (filteredBarangays.isEmpty)
+                  const _EmptyState(
+                    icon: Icons.search_off,
+                    title: 'No matching barangay',
+                    message:
+                        'Try a different keyword or district filter to find the barangay.',
+                  )
                 else
-                  ...barangays.map(
+                  ...visibleBarangays.map(
                     (barangay) => Padding(
                       padding: const EdgeInsets.only(bottom: 12),
                       child: _BarangayCompletionCard(
@@ -134,6 +281,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           );
                         },
                       ),
+                    ),
+                  ),
+                if (filteredBarangays.length > _initialVisibleCount)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: () {
+                        setState(() {
+                          _showAllBarangays = !_showAllBarangays;
+                        });
+                      },
+                      icon: Icon(
+                        _showAllBarangays
+                            ? Icons.expand_less
+                            : Icons.expand_more,
+                      ),
+                      label: Text(_showAllBarangays ? 'See less' : 'See more'),
                     ),
                   ),
                 const SizedBox(height: 16),
@@ -157,24 +321,124 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     }
 
                     final logs = snapshot.data ?? const <CollectionLogItem>[];
-                    if (logs.isEmpty) {
-                      return const _EmptyState(
-                        icon: Icons.inbox_outlined,
-                        title: 'No recent logs',
-                        message:
-                            'When collection logs are added in Supabase, they will appear here.',
+                    final logStatusOptions =
+                        logs
+                            .map((log) => log.status.trim())
+                            .where((status) => status.isNotEmpty)
+                            .toSet()
+                            .toList()
+                          ..sort(
+                            (a, b) =>
+                                a.toLowerCase().compareTo(b.toLowerCase()),
+                          );
+                    final logFilterOptions = <String>[
+                      'All',
+                      ...logStatusOptions,
+                    ];
+                    final selectedLogFilter =
+                        logFilterOptions.contains(_logsFilter)
+                        ? _logsFilter
+                        : 'All';
+                    final filteredLogs = logs.where((log) {
+                      final matchesQuery = _matchesQuery(
+                        query: _logsQuery,
+                        values: [
+                          log.barangayName,
+                          log.barangayDistrict,
+                          log.barangayCity,
+                          log.scheduleDayOfWeek,
+                          log.remarks,
+                          log.status,
+                        ],
                       );
-                    }
+                      final matchesFilter =
+                          selectedLogFilter == 'All' ||
+                          log.status == selectedLogFilter;
+                      return matchesQuery && matchesFilter;
+                    }).toList();
+                    final visibleLogs = _visibleItems(
+                      filteredLogs,
+                      showAll: _showAllLogs,
+                    );
 
                     return Column(
-                      children: logs
-                          .map(
-                            (log) => Padding(
-                              padding: const EdgeInsets.only(bottom: 10),
-                              child: _RecentLogCard(log: log),
-                            ),
+                      children: [
+                        _SearchAndFilterBar(
+                          searchHint: 'Search by barangay, status, or remarks',
+                          searchController: _logsSearchController,
+                          filterLabel: 'Status',
+                          filterValue: selectedLogFilter,
+                          filterOptions: logFilterOptions,
+                          onSearchChanged: (value) {
+                            setState(() {
+                              _logsQuery = value;
+                              _showAllLogs = false;
+                            });
+                          },
+                          onFilterChanged: (value) {
+                            setState(() {
+                              _logsFilter = value;
+                              _showAllLogs = false;
+                            });
+                          },
+                        ),
+                        const SizedBox(height: 10),
+                        if (logs.isEmpty)
+                          const _EmptyState(
+                            icon: Icons.inbox_outlined,
+                            title: 'No recent logs',
+                            message:
+                                'When collection logs are added in Supabase, they will appear here.',
                           )
-                          .toList(),
+                        else if (filteredLogs.isEmpty)
+                          const _EmptyState(
+                            icon: Icons.search_off,
+                            title: 'No matching logs',
+                            message:
+                                'Try a different keyword or status filter to find logs.',
+                          )
+                        else
+                          ...visibleLogs
+                              .map(
+                                (log) => Padding(
+                                  padding: const EdgeInsets.only(bottom: 10),
+                                  child: _RecentLogCard(
+                                    log: log,
+                                    onTap: () {
+                                      Navigator.of(context).pushNamed(
+                                        '/details',
+                                        arguments: {
+                                          'barangayId': log.barangayId,
+                                          'barangayName': log.barangayName,
+                                          'district': log.barangayDistrict,
+                                          'city': log.barangayCity,
+                                        },
+                                      );
+                                    },
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                        if (filteredLogs.length > _initialVisibleCount)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton.icon(
+                              onPressed: () {
+                                setState(() {
+                                  _showAllLogs = !_showAllLogs;
+                                });
+                              },
+                              icon: Icon(
+                                _showAllLogs
+                                    ? Icons.expand_less
+                                    : Icons.expand_more,
+                              ),
+                              label: Text(
+                                _showAllLogs ? 'See less' : 'See more',
+                              ),
+                            ),
+                          ),
+                      ],
                     );
                   },
                 ),
@@ -200,24 +464,119 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
                     final schedules =
                         snapshot.data ?? const <CollectionScheduleItem>[];
-                    if (schedules.isEmpty) {
-                      return const _EmptyState(
-                        icon: Icons.calendar_month_outlined,
-                        title: 'No active schedules',
-                        message:
-                            'Create active schedules in the details screen to populate this area.',
+                    const scheduleFilterOptions = <String>[
+                      'All',
+                      'Active',
+                      'Inactive',
+                    ];
+                    final selectedScheduleFilter =
+                        scheduleFilterOptions.contains(_scheduleFilter)
+                        ? _scheduleFilter
+                        : 'All';
+                    final filteredSchedules = schedules.where((schedule) {
+                      final matchesQuery = _matchesQuery(
+                        query: _scheduleQuery,
+                        values: [
+                          schedule.barangayName,
+                          schedule.district,
+                          schedule.city,
+                          schedule.dayOfWeek,
+                          schedule.wasteType,
+                          schedule.notes,
+                        ],
                       );
-                    }
+                      final matchesFilter =
+                          selectedScheduleFilter == 'All' ||
+                          (selectedScheduleFilter == 'Active' &&
+                              schedule.isActive) ||
+                          (selectedScheduleFilter == 'Inactive' &&
+                              !schedule.isActive);
+                      return matchesQuery && matchesFilter;
+                    }).toList();
+                    final visibleSchedules = _visibleItems(
+                      filteredSchedules,
+                      showAll: _showAllSchedules,
+                    );
 
                     return Column(
-                      children: schedules
-                          .map(
-                            (schedule) => Padding(
-                              padding: const EdgeInsets.only(bottom: 10),
-                              child: _SchedulePreviewCard(schedule: schedule),
-                            ),
+                      children: [
+                        _SearchAndFilterBar(
+                          searchHint:
+                              'Search by barangay, day, waste type, or notes',
+                          searchController: _scheduleSearchController,
+                          filterLabel: 'Status',
+                          filterValue: selectedScheduleFilter,
+                          filterOptions: scheduleFilterOptions,
+                          onSearchChanged: (value) {
+                            setState(() {
+                              _scheduleQuery = value;
+                              _showAllSchedules = false;
+                            });
+                          },
+                          onFilterChanged: (value) {
+                            setState(() {
+                              _scheduleFilter = value;
+                              _showAllSchedules = false;
+                            });
+                          },
+                        ),
+                        const SizedBox(height: 10),
+                        if (schedules.isEmpty)
+                          const _EmptyState(
+                            icon: Icons.calendar_month_outlined,
+                            title: 'No active schedules',
+                            message:
+                                'Create active schedules in the details screen to populate this area.',
                           )
-                          .toList(),
+                        else if (filteredSchedules.isEmpty)
+                          const _EmptyState(
+                            icon: Icons.search_off,
+                            title: 'No matching schedules',
+                            message:
+                                'Try a different keyword or status filter to find schedules.',
+                          )
+                        else
+                          ...visibleSchedules
+                              .map(
+                                (schedule) => Padding(
+                                  padding: const EdgeInsets.only(bottom: 10),
+                                  child: _SchedulePreviewCard(
+                                    schedule: schedule,
+                                    onTap: () {
+                                      Navigator.of(context).pushNamed(
+                                        '/details',
+                                        arguments: {
+                                          'barangayId': schedule.barangayId,
+                                          'barangayName': schedule.barangayName,
+                                          'district': schedule.district,
+                                          'city': schedule.city,
+                                        },
+                                      );
+                                    },
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                        if (filteredSchedules.length > _initialVisibleCount)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton.icon(
+                              onPressed: () {
+                                setState(() {
+                                  _showAllSchedules = !_showAllSchedules;
+                                });
+                              },
+                              icon: Icon(
+                                _showAllSchedules
+                                    ? Icons.expand_less
+                                    : Icons.expand_more,
+                              ),
+                              label: Text(
+                                _showAllSchedules ? 'See less' : 'See more',
+                              ),
+                            ),
+                          ),
+                      ],
                     );
                   },
                 ),
@@ -243,24 +602,130 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
                     final reports =
                         snapshot.data ?? const <ResidentReportItem>[];
-                    if (reports.isEmpty) {
-                      return const _EmptyState(
-                        icon: Icons.report_outlined,
-                        title: 'No recent reports',
-                        message:
-                            'Resident reports synced from Supabase will show up here.',
+                    final reportStatusOptions =
+                        reports
+                            .map((report) => report.status.trim())
+                            .where((status) => status.isNotEmpty)
+                            .toSet()
+                            .toList()
+                          ..sort(
+                            (a, b) =>
+                                a.toLowerCase().compareTo(b.toLowerCase()),
+                          );
+                    final reportFilterOptions = <String>[
+                      'All',
+                      ...reportStatusOptions,
+                    ];
+                    final selectedReportFilter =
+                        reportFilterOptions.contains(_reportFilter)
+                        ? _reportFilter
+                        : 'All';
+                    final filteredReports = reports.where((report) {
+                      final matchesQuery = _matchesQuery(
+                        query: _reportQuery,
+                        values: [
+                          report.residentName,
+                          report.address,
+                          report.addressText,
+                          report.description,
+                          report.status,
+                        ],
                       );
-                    }
+                      final matchesFilter =
+                          selectedReportFilter == 'All' ||
+                          report.status == selectedReportFilter;
+                      return matchesQuery && matchesFilter;
+                    }).toList();
+                    final visibleReports = _visibleItems(
+                      filteredReports,
+                      showAll: _showAllReports,
+                    );
 
                     return Column(
-                      children: reports
-                          .map(
-                            (report) => Padding(
-                              padding: const EdgeInsets.only(bottom: 10),
-                              child: _ReportPreviewCard(report: report),
-                            ),
+                      children: [
+                        _SearchAndFilterBar(
+                          searchHint:
+                              'Search by resident, barangay address, or status',
+                          searchController: _reportSearchController,
+                          filterLabel: 'Status',
+                          filterValue: selectedReportFilter,
+                          filterOptions: reportFilterOptions,
+                          onSearchChanged: (value) {
+                            setState(() {
+                              _reportQuery = value;
+                              _showAllReports = false;
+                            });
+                          },
+                          onFilterChanged: (value) {
+                            setState(() {
+                              _reportFilter = value;
+                              _showAllReports = false;
+                            });
+                          },
+                        ),
+                        const SizedBox(height: 10),
+                        if (reports.isEmpty)
+                          const _EmptyState(
+                            icon: Icons.report_outlined,
+                            title: 'No recent reports',
+                            message:
+                                'Resident reports synced from Supabase will show up here.',
                           )
-                          .toList(),
+                        else if (filteredReports.isEmpty)
+                          const _EmptyState(
+                            icon: Icons.search_off,
+                            title: 'No matching reports',
+                            message:
+                                'Try a different keyword or status filter to find reports.',
+                          )
+                        else
+                          ...visibleReports.map((report) {
+                            final reportBarangay = report.userBarangayId == null
+                                ? null
+                                : barangayById[report.userBarangayId!];
+
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: _ReportPreviewCard(
+                                report: report,
+                                barangayName:
+                                    reportBarangay?.name ?? 'Unknown barangay',
+                                onTap: reportBarangay == null
+                                    ? null
+                                    : () {
+                                        Navigator.of(context).pushNamed(
+                                          '/details',
+                                          arguments: {
+                                            'barangayId': reportBarangay.id,
+                                            'barangayName': reportBarangay.name,
+                                            'district': reportBarangay.district,
+                                            'city': reportBarangay.city,
+                                          },
+                                        );
+                                      },
+                              ),
+                            );
+                          }).toList(),
+                        if (filteredReports.length > _initialVisibleCount)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton.icon(
+                              onPressed: () {
+                                setState(() {
+                                  _showAllReports = !_showAllReports;
+                                });
+                              },
+                              icon: Icon(
+                                _showAllReports
+                                    ? Icons.expand_less
+                                    : Icons.expand_more,
+                              ),
+                              label: Text(
+                                _showAllReports ? 'See less' : 'See more',
+                              ),
+                            ),
+                          ),
+                      ],
                     );
                   },
                 ),
@@ -269,6 +734,89 @@ class _DashboardScreenState extends State<DashboardScreen> {
           },
         ),
       ),
+    );
+  }
+}
+
+class _SearchAndFilterBar extends StatelessWidget {
+  const _SearchAndFilterBar({
+    required this.searchHint,
+    required this.searchController,
+    required this.filterLabel,
+    required this.filterValue,
+    required this.filterOptions,
+    required this.onSearchChanged,
+    required this.onFilterChanged,
+  });
+
+  final String searchHint;
+  final TextEditingController searchController;
+  final String filterLabel;
+  final String filterValue;
+  final List<String> filterOptions;
+  final ValueChanged<String> onSearchChanged;
+  final ValueChanged<String> onFilterChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final searchField = TextField(
+      controller: searchController,
+      onChanged: onSearchChanged,
+      decoration: InputDecoration(
+        hintText: searchHint,
+        prefixIcon: const Icon(Icons.search),
+        suffixIcon: searchController.text.isEmpty
+            ? null
+            : IconButton(
+                tooltip: 'Clear search',
+                icon: const Icon(Icons.close),
+                onPressed: () {
+                  searchController.clear();
+                  onSearchChanged('');
+                },
+              ),
+        border: const OutlineInputBorder(),
+      ),
+    );
+
+    final filterField = DropdownButtonFormField<String>(
+      value: filterValue,
+      isExpanded: true,
+      decoration: InputDecoration(
+        labelText: filterLabel,
+        prefixIcon: const Icon(Icons.filter_list),
+        border: const OutlineInputBorder(),
+      ),
+      items: filterOptions
+          .map(
+            (option) =>
+                DropdownMenuItem<String>(value: option, child: Text(option)),
+          )
+          .toList(),
+      onChanged: (value) {
+        if (value != null) {
+          onFilterChanged(value);
+        }
+      },
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isNarrow = constraints.maxWidth < 720;
+        if (isNarrow) {
+          return Column(
+            children: [searchField, const SizedBox(height: 10), filterField],
+          );
+        }
+
+        return Row(
+          children: [
+            Expanded(flex: 3, child: searchField),
+            const SizedBox(width: 10),
+            Expanded(flex: 2, child: filterField),
+          ],
+        );
+      },
     );
   }
 }
@@ -746,184 +1294,222 @@ class _DashboardSectionSkeleton extends StatelessWidget {
 }
 
 class _RecentLogCard extends StatelessWidget {
-  const _RecentLogCard({required this.log});
+  const _RecentLogCard({required this.log, required this.onTap});
 
   final CollectionLogItem log;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: scheme.surface,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: scheme.outlineVariant.withValues(alpha: 0.45),
+        onTap: onTap,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: scheme.surface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: scheme.outlineVariant.withValues(alpha: 0.45),
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: scheme.primaryContainer,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Icon(Icons.local_shipping_outlined),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      log.barangayName,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${log.scheduleDayOfWeek.isEmpty ? 'Collection log' : log.scheduleDayOfWeek} • ${_formatDate(log.collectionDate)}',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      log.remarks.isEmpty ? 'No remarks provided' : log.remarks,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              _StatusPill(label: log.status),
+            ],
+          ),
         ),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: scheme.primaryContainer,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: const Icon(Icons.local_shipping_outlined),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  log.barangayName,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  '${log.scheduleDayOfWeek.isEmpty ? 'Collection log' : log.scheduleDayOfWeek} • ${_formatDate(log.collectionDate)}',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  log.remarks.isEmpty ? 'No remarks provided' : log.remarks,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          _StatusPill(label: log.status),
-        ],
       ),
     );
   }
 }
 
 class _SchedulePreviewCard extends StatelessWidget {
-  const _SchedulePreviewCard({required this.schedule});
+  const _SchedulePreviewCard({required this.schedule, required this.onTap});
 
   final CollectionScheduleItem schedule;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: scheme.surface,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: scheme.outlineVariant.withValues(alpha: 0.45),
+        onTap: onTap,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: scheme.surface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: scheme.outlineVariant.withValues(alpha: 0.45),
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: scheme.secondaryContainer,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Icon(Icons.calendar_month_outlined),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${schedule.dayOfWeek} • ${schedule.barangayName}',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${schedule.wasteType.isEmpty ? 'Waste type not set' : schedule.wasteType} • ${_formatTimeOfDay(schedule.startTime?.format(context) ?? 'N/A')} - ${_formatTimeOfDay(schedule.endTime?.format(context) ?? 'N/A')}',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              _StatusPill(label: schedule.isActive ? 'Active' : 'Inactive'),
+            ],
+          ),
         ),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: scheme.secondaryContainer,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: const Icon(Icons.calendar_month_outlined),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '${schedule.dayOfWeek} • ${schedule.barangayName}',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  '${schedule.wasteType.isEmpty ? 'Waste type not set' : schedule.wasteType} • ${_formatTimeOfDay(schedule.startTime?.format(context) ?? 'N/A')} - ${_formatTimeOfDay(schedule.endTime?.format(context) ?? 'N/A')}',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          _StatusPill(label: schedule.isActive ? 'Active' : 'Inactive'),
-        ],
       ),
     );
   }
 }
 
 class _ReportPreviewCard extends StatelessWidget {
-  const _ReportPreviewCard({required this.report});
+  const _ReportPreviewCard({
+    required this.report,
+    required this.barangayName,
+    this.onTap,
+  });
 
   final ResidentReportItem report;
+  final String barangayName;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: scheme.surface,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: scheme.outlineVariant.withValues(alpha: 0.45),
+        onTap: onTap,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: scheme.surface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: scheme.outlineVariant.withValues(alpha: 0.45),
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: scheme.tertiaryContainer,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Icon(Icons.report_outlined),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      report.residentName,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'Barangay: $barangayName',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      report.addressText.isEmpty
+                          ? report.address
+                          : report.addressText,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              _StatusPill(label: report.status),
+            ],
+          ),
         ),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: scheme.tertiaryContainer,
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: const Icon(Icons.report_outlined),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  report.residentName,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  report.addressText.isEmpty
-                      ? report.address
-                      : report.addressText,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          _StatusPill(label: report.status),
-        ],
       ),
     );
   }

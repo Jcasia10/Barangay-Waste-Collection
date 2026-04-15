@@ -24,6 +24,8 @@ class DetailsScreen extends StatefulWidget {
 
 class _DetailsScreenState extends State<DetailsScreen> {
   final AdminDashboardService _service = AdminDashboardService();
+  static const int _initialVisibleCount = 3;
+  static const double _backToTopOffset = 320;
   RealtimeChannel? _schedulesChannel;
   static const List<String> _dayOfWeekOptions = <String>[
     'Monday',
@@ -44,17 +46,43 @@ class _DetailsScreenState extends State<DetailsScreen> {
     'completed',
     'missed',
   ];
+  static const List<String> _residentReportStatuses = <String>[
+    'pending',
+    'in_review',
+    'resolved',
+  ];
 
   late Future<List<CollectionLogItem>> _logsFuture;
   late Future<List<ResidentReportItem>> _reportsFuture;
   late Future<List<CollectionScheduleItem>> _schedulesFuture;
   late Future<List<String>> _collectionPhotosFuture;
+  final Set<dynamic> _updatingReportIds = <dynamic>{};
+
+  String _logsQuery = '';
+  String _logsFilter = 'All';
+  bool _showAllLogs = false;
+  final TextEditingController _logsSearchController = TextEditingController();
+
+  String _reportsQuery = '';
+  String _reportsFilter = 'All';
+  bool _showAllReports = false;
+  final TextEditingController _reportsSearchController =
+      TextEditingController();
+
+  String _schedulesQuery = '';
+  String _schedulesFilter = 'All';
+  bool _showAllSchedules = false;
+  final TextEditingController _schedulesSearchController =
+      TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  bool _showBackToTop = false;
 
   @override
   void initState() {
     super.initState();
     _reloadData();
     _subscribeToScheduleChanges();
+    _scrollController.addListener(_onScrollChanged);
   }
 
   void _reloadData() {
@@ -86,6 +114,13 @@ class _DetailsScreenState extends State<DetailsScreen> {
       _logsFuture = _service.fetchBarangayLogs(widget.barangayId);
     });
     await _logsFuture;
+  }
+
+  Future<void> _refreshReports() async {
+    setState(() {
+      _reportsFuture = _service.fetchResidentReports(widget.barangayId);
+    });
+    await _reportsFuture;
   }
 
   Future<void> _updateCollectionLogStatus(
@@ -130,6 +165,66 @@ class _DetailsScreenState extends State<DetailsScreen> {
     await _collectionPhotosFuture;
   }
 
+  String _normalizeResidentReportStatus(String value) {
+    final normalized = value.trim().toLowerCase();
+    if (_residentReportStatuses.contains(normalized)) {
+      return normalized;
+    }
+    return 'pending';
+  }
+
+  Future<void> _updateResidentReportStatus(
+    ResidentReportItem report,
+    String status,
+  ) async {
+    if (_updatingReportIds.contains(report.id)) {
+      return;
+    }
+
+    setState(() {
+      _updatingReportIds.add(report.id);
+    });
+
+    try {
+      await _service.updateResidentReportStatus(
+        reportId: report.id,
+        status: status,
+      );
+      if (!mounted) {
+        return;
+      }
+      await _refreshReports();
+    } on PostgrestException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            error.message.isNotEmpty
+                ? error.message
+                : 'Unable to update resident report status.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Unable to update resident report status: $error'),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _updatingReportIds.remove(report.id);
+        });
+      }
+    }
+  }
+
   void _subscribeToScheduleChanges() {
     final channelName = 'schedules-${widget.barangayId}';
     _schedulesChannel = Supabase.instance.client.channel(channelName)
@@ -156,10 +251,68 @@ class _DetailsScreenState extends State<DetailsScreen> {
 
   @override
   void dispose() {
+    _scrollController
+      ..removeListener(_onScrollChanged)
+      ..dispose();
+    _logsSearchController.dispose();
+    _reportsSearchController.dispose();
+    _schedulesSearchController.dispose();
     if (_schedulesChannel != null) {
       Supabase.instance.client.removeChannel(_schedulesChannel!);
     }
     super.dispose();
+  }
+
+  void _onScrollChanged() {
+    final shouldShow =
+        _scrollController.hasClients &&
+        _scrollController.offset > _backToTopOffset;
+    if (shouldShow != _showBackToTop) {
+      setState(() {
+        _showBackToTop = shouldShow;
+      });
+    }
+  }
+
+  Future<void> _scrollToTop() async {
+    if (!_scrollController.hasClients) {
+      return;
+    }
+    await _scrollController.animateTo(
+      0,
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  List<T> _visibleItems<T>(List<T> items, {required bool showAll}) {
+    if (showAll) {
+      return items;
+    }
+    return items.take(_initialVisibleCount).toList();
+  }
+
+  bool _matchesQuery({required String query, required List<String> values}) {
+    final normalizedQuery = query.trim().toLowerCase();
+    if (normalizedQuery.isEmpty) {
+      return true;
+    }
+
+    return values.any((value) => value.toLowerCase().contains(normalizedQuery));
+  }
+
+  int _residentReportStatusPriority(String status) {
+    final normalized = _normalizeResidentReportStatus(status);
+    switch (normalized) {
+      case 'pending':
+        return 0;
+      case 'in_review':
+        return 1;
+      case 'resolved':
+        return 2;
+      default:
+        return 3;
+    }
   }
 
   Future<void> _addSchedule() async {
@@ -544,19 +697,18 @@ class _DetailsScreenState extends State<DetailsScreen> {
     final theme = Theme.of(context);
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.barangayName),
-        actions: [
-          IconButton(
-            tooltip: 'Log out',
-            onPressed: widget.onLogout,
-            icon: const Icon(Icons.logout),
-          ),
-        ],
-      ),
+      appBar: AppBar(title: Text(widget.barangayName)),
+      floatingActionButton: _showBackToTop
+          ? FloatingActionButton.extended(
+              onPressed: _scrollToTop,
+              icon: const Icon(Icons.keyboard_arrow_up),
+              label: const Text('Back to top'),
+            )
+          : null,
       body: RefreshIndicator(
         onRefresh: _refreshAll,
         child: ListView(
+          controller: _scrollController,
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
           children: [
@@ -588,11 +740,65 @@ class _DetailsScreenState extends State<DetailsScreen> {
 
                 final logs = snapshot.data ?? const <CollectionLogItem>[];
                 final summary = _buildSummary(logs);
+                final logStatusOptions =
+                    logs
+                        .map((log) => log.status.trim())
+                        .where((status) => status.isNotEmpty)
+                        .toSet()
+                        .toList()
+                      ..sort(
+                        (a, b) => a.toLowerCase().compareTo(b.toLowerCase()),
+                      );
+                final logFilterOptions = <String>['All', ...logStatusOptions];
+                final selectedLogFilter = logFilterOptions.contains(_logsFilter)
+                    ? _logsFilter
+                    : 'All';
+                final filteredLogs = logs.where((log) {
+                  final matchesQuery = _matchesQuery(
+                    query: _logsQuery,
+                    values: [
+                      log.scheduleDayOfWeek,
+                      log.scheduleWasteType,
+                      log.remarks,
+                      log.status,
+                      log.barangayName,
+                    ],
+                  );
+                  final matchesFilter =
+                      selectedLogFilter == 'All' ||
+                      log.status == selectedLogFilter;
+                  return matchesQuery && matchesFilter;
+                }).toList();
+                final visibleLogs = _visibleItems(
+                  filteredLogs,
+                  showAll: _showAllLogs,
+                );
 
                 return Column(
                   children: [
                     _CompletionSummaryCard(summary: summary),
                     const SizedBox(height: 12),
+                    _SearchAndFilterBar(
+                      searchHint:
+                          'Search logs by day, type, remarks, or status',
+                      searchController: _logsSearchController,
+                      filterLabel: 'Status',
+                      filterValue: selectedLogFilter,
+                      filterOptions: logFilterOptions,
+                      onSearchChanged: (value) {
+                        setState(() {
+                          _logsQuery = value;
+                          _showAllLogs = false;
+                        });
+                      },
+                      onFilterChanged: (value) {
+                        setState(() {
+                          _logsFilter = value;
+                          _showAllLogs = false;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 10),
                     if (logs.isEmpty)
                       const _EmptyInlineState(
                         icon: Icons.inbox_outlined,
@@ -600,8 +806,15 @@ class _DetailsScreenState extends State<DetailsScreen> {
                         message:
                             'This barangay does not have collection logs yet.',
                       )
+                    else if (filteredLogs.isEmpty)
+                      const _EmptyInlineState(
+                        icon: Icons.search_off,
+                        title: 'No matching logs',
+                        message:
+                            'Try a different search keyword or status filter.',
+                      )
                     else
-                      ...logs.map(
+                      ...visibleLogs.map(
                         (log) => Padding(
                           padding: const EdgeInsets.only(bottom: 12),
                           child: _CollectionLogCard(
@@ -612,6 +825,23 @@ class _DetailsScreenState extends State<DetailsScreen> {
                             onStatusChanged: (value) =>
                                 _updateCollectionLogStatus(log, value),
                           ),
+                        ),
+                      ),
+                    if (filteredLogs.length > _initialVisibleCount)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              _showAllLogs = !_showAllLogs;
+                            });
+                          },
+                          icon: Icon(
+                            _showAllLogs
+                                ? Icons.expand_less
+                                : Icons.expand_more,
+                          ),
+                          label: Text(_showAllLogs ? 'See less' : 'See more'),
                         ),
                       ),
                   ],
@@ -640,24 +870,141 @@ class _DetailsScreenState extends State<DetailsScreen> {
                 }
 
                 final reports = snapshot.data ?? const <ResidentReportItem>[];
-                if (reports.isEmpty) {
-                  return const _EmptyInlineState(
-                    icon: Icons.report_outlined,
-                    title: 'No resident reports found',
-                    message:
-                        'Resident reports linked to this barangay will appear here.',
-                  );
-                }
+                final reportStatusOptions =
+                    reports
+                        .map((report) => report.status.trim())
+                        .where((status) => status.isNotEmpty)
+                        .toSet()
+                        .toList()
+                      ..sort(
+                        (a, b) => a.toLowerCase().compareTo(b.toLowerCase()),
+                      );
+                final reportFilterOptions = <String>[
+                  'All',
+                  ...reportStatusOptions,
+                ];
+                final selectedReportFilter =
+                    reportFilterOptions.contains(_reportsFilter)
+                    ? _reportsFilter
+                    : 'All';
+                final filteredReports =
+                    reports.where((report) {
+                      final matchesQuery = _matchesQuery(
+                        query: _reportsQuery,
+                        values: [
+                          report.residentName,
+                          report.address,
+                          report.addressText,
+                          report.description,
+                          report.status,
+                        ],
+                      );
+                      final matchesFilter =
+                          selectedReportFilter == 'All' ||
+                          report.status == selectedReportFilter;
+                      return matchesQuery && matchesFilter;
+                    }).toList()..sort((a, b) {
+                      final priorityCompare = _residentReportStatusPriority(
+                        a.status,
+                      ).compareTo(_residentReportStatusPriority(b.status));
+                      if (priorityCompare != 0) {
+                        return priorityCompare;
+                      }
+
+                      final aDate = a.createdAt;
+                      final bDate = b.createdAt;
+                      if (aDate == null && bDate == null) {
+                        return 0;
+                      }
+                      if (aDate == null) {
+                        return 1;
+                      }
+                      if (bDate == null) {
+                        return -1;
+                      }
+                      return bDate.compareTo(aDate);
+                    });
+                final visibleReports = _visibleItems(
+                  filteredReports,
+                  showAll: _showAllReports,
+                );
 
                 return Column(
-                  children: reports
-                      .map(
-                        (report) => Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: _ResidentReportCard(report: report),
-                        ),
+                  children: [
+                    _SearchAndFilterBar(
+                      searchHint:
+                          'Search reports by resident, address, or status',
+                      searchController: _reportsSearchController,
+                      filterLabel: 'Status',
+                      filterValue: selectedReportFilter,
+                      filterOptions: reportFilterOptions,
+                      onSearchChanged: (value) {
+                        setState(() {
+                          _reportsQuery = value;
+                          _showAllReports = false;
+                        });
+                      },
+                      onFilterChanged: (value) {
+                        setState(() {
+                          _reportsFilter = value;
+                          _showAllReports = false;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    if (reports.isEmpty)
+                      const _EmptyInlineState(
+                        icon: Icons.report_outlined,
+                        title: 'No resident reports found',
+                        message:
+                            'Resident reports linked to this barangay will appear here.',
                       )
-                      .toList(),
+                    else if (filteredReports.isEmpty)
+                      const _EmptyInlineState(
+                        icon: Icons.search_off,
+                        title: 'No matching reports',
+                        message:
+                            'Try a different search keyword or status filter.',
+                      )
+                    else
+                      ...visibleReports
+                          .map(
+                            (report) => Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: _ResidentReportCard(
+                                report: report,
+                                selectedStatus: _normalizeResidentReportStatus(
+                                  report.status,
+                                ),
+                                isUpdating: _updatingReportIds.contains(
+                                  report.id,
+                                ),
+                                onStatusChanged: (value) =>
+                                    _updateResidentReportStatus(report, value),
+                              ),
+                            ),
+                          )
+                          .toList(),
+                    if (filteredReports.length > _initialVisibleCount)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              _showAllReports = !_showAllReports;
+                            });
+                          },
+                          icon: Icon(
+                            _showAllReports
+                                ? Icons.expand_less
+                                : Icons.expand_more,
+                          ),
+                          label: Text(
+                            _showAllReports ? 'See less' : 'See more',
+                          ),
+                        ),
+                      ),
+                  ],
                 );
               },
             ),
@@ -738,28 +1085,110 @@ class _DetailsScreenState extends State<DetailsScreen> {
 
                 final schedules =
                     snapshot.data ?? const <CollectionScheduleItem>[];
-                if (schedules.isEmpty) {
-                  return const _EmptyInlineState(
-                    icon: Icons.calendar_month_outlined,
-                    title: 'No schedules found',
-                    message:
-                        'Create collection schedules for this barangay in Supabase.',
+                const scheduleFilterOptions = <String>[
+                  'All',
+                  'Active',
+                  'Inactive',
+                ];
+                final selectedScheduleFilter =
+                    scheduleFilterOptions.contains(_schedulesFilter)
+                    ? _schedulesFilter
+                    : 'All';
+                final filteredSchedules = schedules.where((schedule) {
+                  final matchesQuery = _matchesQuery(
+                    query: _schedulesQuery,
+                    values: [
+                      schedule.dayOfWeek,
+                      schedule.wasteType,
+                      schedule.notes,
+                      schedule.barangayName,
+                      schedule.city,
+                    ],
                   );
-                }
+                  final matchesFilter =
+                      selectedScheduleFilter == 'All' ||
+                      (selectedScheduleFilter == 'Active' &&
+                          schedule.isActive) ||
+                      (selectedScheduleFilter == 'Inactive' &&
+                          !schedule.isActive);
+                  return matchesQuery && matchesFilter;
+                }).toList();
+                final visibleSchedules = _visibleItems(
+                  filteredSchedules,
+                  showAll: _showAllSchedules,
+                );
 
                 return Column(
-                  children: schedules
-                      .map(
-                        (schedule) => Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: _ScheduleCard(
-                            schedule: schedule,
-                            onEditPressed: () => _editSchedule(schedule),
-                            onDeletePressed: () => _deleteSchedule(schedule),
+                  children: [
+                    _SearchAndFilterBar(
+                      searchHint:
+                          'Search schedules by day, waste type, notes, or city',
+                      searchController: _schedulesSearchController,
+                      filterLabel: 'Status',
+                      filterValue: selectedScheduleFilter,
+                      filterOptions: scheduleFilterOptions,
+                      onSearchChanged: (value) {
+                        setState(() {
+                          _schedulesQuery = value;
+                          _showAllSchedules = false;
+                        });
+                      },
+                      onFilterChanged: (value) {
+                        setState(() {
+                          _schedulesFilter = value;
+                          _showAllSchedules = false;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    if (schedules.isEmpty)
+                      const _EmptyInlineState(
+                        icon: Icons.calendar_month_outlined,
+                        title: 'No schedules found',
+                        message:
+                            'Create collection schedules for this barangay in Supabase.',
+                      )
+                    else if (filteredSchedules.isEmpty)
+                      const _EmptyInlineState(
+                        icon: Icons.search_off,
+                        title: 'No matching schedules',
+                        message:
+                            'Try a different search keyword or status filter.',
+                      )
+                    else
+                      ...visibleSchedules
+                          .map(
+                            (schedule) => Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: _ScheduleCard(
+                                schedule: schedule,
+                                onEditPressed: () => _editSchedule(schedule),
+                                onDeletePressed: () =>
+                                    _deleteSchedule(schedule),
+                              ),
+                            ),
+                          )
+                          .toList(),
+                    if (filteredSchedules.length > _initialVisibleCount)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              _showAllSchedules = !_showAllSchedules;
+                            });
+                          },
+                          icon: Icon(
+                            _showAllSchedules
+                                ? Icons.expand_less
+                                : Icons.expand_more,
+                          ),
+                          label: Text(
+                            _showAllSchedules ? 'See less' : 'See more',
                           ),
                         ),
-                      )
-                      .toList(),
+                      ),
+                  ],
                 );
               },
             ),
@@ -1034,22 +1463,24 @@ class _CollectionLogCard extends StatelessWidget {
               children: [
                 Text(
                   '${log.scheduleDayOfWeek.isEmpty ? 'Collection log' : log.scheduleDayOfWeek} • ${_formatDate(log.collectionDate)}',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
                 const SizedBox(height: 8),
                 Text(
                   '${log.scheduleWasteType.isEmpty ? 'Waste type not specified' : log.scheduleWasteType} • ${log.barangayName}',
                 ),
                 const SizedBox(height: 10),
-                Text(log.remarks.isEmpty ? 'No remarks provided.' : log.remarks),
+                Text(
+                  log.remarks.isEmpty ? 'No remarks provided.' : log.remarks,
+                ),
                 const SizedBox(height: 8),
                 Text(
                   'Time: ${_formatTimeOfDay(log.scheduleStartTime)} - ${_formatTimeOfDay(log.scheduleEndTime)}',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
                 ),
               ],
             ),
@@ -1091,9 +1522,17 @@ class _CollectionLogCard extends StatelessWidget {
 }
 
 class _ResidentReportCard extends StatefulWidget {
-  const _ResidentReportCard({required this.report});
+  const _ResidentReportCard({
+    required this.report,
+    required this.selectedStatus,
+    required this.onStatusChanged,
+    required this.isUpdating,
+  });
 
   final ResidentReportItem report;
+  final String selectedStatus;
+  final ValueChanged<String> onStatusChanged;
+  final bool isUpdating;
 
   @override
   State<_ResidentReportCard> createState() => _ResidentReportCardState();
@@ -1175,6 +1614,7 @@ class _ResidentReportCardState extends State<_ResidentReportCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
                 child: Text(
@@ -1184,7 +1624,61 @@ class _ResidentReportCardState extends State<_ResidentReportCard> {
                   ),
                 ),
               ),
-              _StatusChip(label: widget.report.status),
+              const SizedBox(width: 12),
+              SizedBox(
+                width: 130,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    DropdownButtonFormField<String>(
+                      initialValue: widget.selectedStatus,
+                      isDense: true,
+                      iconSize: 18,
+                      style: Theme.of(context).textTheme.labelSmall,
+                      decoration: const InputDecoration(
+                        labelText: 'Status',
+                        isDense: true,
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 8,
+                        ),
+                        border: OutlineInputBorder(),
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'pending',
+                          child: Text('Pending'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'in_review',
+                          child: Text('In review'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'resolved',
+                          child: Text('Resolved'),
+                        ),
+                      ],
+                      onChanged: widget.isUpdating
+                          ? null
+                          : (value) {
+                              if (value == null ||
+                                  value == widget.selectedStatus) {
+                                return;
+                              }
+                              widget.onStatusChanged(value);
+                            },
+                    ),
+                    if (widget.isUpdating) ...[
+                      const SizedBox(height: 8),
+                      const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 8),
@@ -1471,6 +1965,89 @@ class _PhotoCarouselState extends State<_PhotoCarousel> {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _SearchAndFilterBar extends StatelessWidget {
+  const _SearchAndFilterBar({
+    required this.searchHint,
+    required this.searchController,
+    required this.filterLabel,
+    required this.filterValue,
+    required this.filterOptions,
+    required this.onSearchChanged,
+    required this.onFilterChanged,
+  });
+
+  final String searchHint;
+  final TextEditingController searchController;
+  final String filterLabel;
+  final String filterValue;
+  final List<String> filterOptions;
+  final ValueChanged<String> onSearchChanged;
+  final ValueChanged<String> onFilterChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final searchField = TextField(
+      controller: searchController,
+      onChanged: onSearchChanged,
+      decoration: InputDecoration(
+        hintText: searchHint,
+        prefixIcon: const Icon(Icons.search),
+        suffixIcon: searchController.text.isEmpty
+            ? null
+            : IconButton(
+                tooltip: 'Clear search',
+                icon: const Icon(Icons.close),
+                onPressed: () {
+                  searchController.clear();
+                  onSearchChanged('');
+                },
+              ),
+        border: const OutlineInputBorder(),
+      ),
+    );
+
+    final filterField = DropdownButtonFormField<String>(
+      value: filterValue,
+      isExpanded: true,
+      decoration: InputDecoration(
+        labelText: filterLabel,
+        prefixIcon: const Icon(Icons.filter_list),
+        border: const OutlineInputBorder(),
+      ),
+      items: filterOptions
+          .map(
+            (option) =>
+                DropdownMenuItem<String>(value: option, child: Text(option)),
+          )
+          .toList(),
+      onChanged: (value) {
+        if (value != null) {
+          onFilterChanged(value);
+        }
+      },
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isNarrow = constraints.maxWidth < 720;
+        if (isNarrow) {
+          return Column(
+            children: [searchField, const SizedBox(height: 10), filterField],
+          );
+        }
+
+        return Row(
+          children: [
+            Expanded(flex: 3, child: searchField),
+            const SizedBox(width: 10),
+            Expanded(flex: 2, child: filterField),
+          ],
+        );
+      },
     );
   }
 }
