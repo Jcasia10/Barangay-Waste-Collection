@@ -1,5 +1,6 @@
 -- Run this in the Supabase SQL editor.
--- It enables RLS and creates admin-only policies based on public.users.role = 'admin'.
+-- It enables RLS and creates admin-only policies.
+-- Admin detection is case-insensitive and trims whitespace.
 
 create or replace function public.is_admin()
 returns boolean
@@ -12,7 +13,7 @@ as $$
     select 1
     from public.users u
     where u.id = auth.uid()
-      and u.role = 'admin'
+      and lower(trim(coalesce(u.role, ''))) = 'admin'
   );
 $$;
 
@@ -27,8 +28,10 @@ alter table public.waste_reports enable row level security;
 
 -- Remove existing policies first so this script can be rerun safely.
 drop policy if exists "Admins can read barangays" on public.barangay;
+drop policy if exists "Admins can insert barangays" on public.barangay;
 drop policy if exists "Admins can read collection logs" on public.collection_logs;
 drop policy if exists "Admins can update collection logs" on public.collection_logs;
+drop policy if exists "Admins can insert collection logs" on public.collection_logs;
 drop policy if exists "Admins can read collection schedules" on public.collection_schedules;
 drop policy if exists "Admins can update collection schedules" on public.collection_schedules;
 drop policy if exists "Admins can insert collection schedules" on public.collection_schedules;
@@ -46,6 +49,11 @@ on public.barangay
 for select
 using (public.is_admin());
 
+create policy "Admins can insert barangays"
+on public.barangay
+for insert
+with check (public.is_admin());
+
 create policy "Admins can read collection logs"
 on public.collection_logs
 for select
@@ -55,6 +63,11 @@ create policy "Admins can update collection logs"
 on public.collection_logs
 for update
 using (public.is_admin())
+with check (public.is_admin());
+
+create policy "Admins can insert collection logs"
+on public.collection_logs
+for insert
 with check (public.is_admin());
 
 create policy "Admins can read collection schedules"

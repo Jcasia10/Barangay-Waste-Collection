@@ -12,7 +12,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 const String _themePrefKey = 'isDarkMode';
-const String _routePrefKey = 'lastRoute';
 
 const String _authRoute = '/auth';
 const String _dashboardRoute = '/dashboard';
@@ -24,12 +23,6 @@ const String _supabaseUrl = 'https://uimpwcruncvihxxbgdxp.supabase.co';
 const String _supabaseAnonKey =
     'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVpbXB3Y3J1bmN2aWh4eGJnZHhwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ1MjQwMTIsImV4cCI6MjA5MDEwMDAxMn0.P17YEAHdscL3WQmauAwkQqEvZpim_MhQmwFsy_-2ETc';
 const String _siteUrl = 'http://localhost:64026';
-const Set<String> _allowedRoutes = {
-  _authRoute,
-  _dashboardRoute,
-  _settingsRoute,
-  _myAccountRoute,
-};
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -55,48 +48,33 @@ Future<_AppBootstrapData> _buildBootstrap(SharedPreferences prefs) async {
   final webThemeMode = web_theme_storage.readWebThemeMode();
   final isDarkMode = webThemeMode ?? (prefs.getBool(_themePrefKey) ?? false);
 
-  final savedRoute = prefs.getString(_routePrefKey) ?? _authRoute;
-  var initialRoute = _allowedRoutes.contains(savedRoute)
-      ? savedRoute
-      : _authRoute;
-
   final authIntentFromUrl = _readAuthIntentFromUrl();
   final client = Supabase.instance.client;
-  var session = client.auth.currentSession;
+  final session = client.auth.currentSession;
 
-  // Web-only behavior:
-  // - Keep session during page refresh (same tab session).
-  // - Clear session when tab/browser was fully closed and re-opened.
-  final isFreshWebSession =
-      kIsWeb && !web_session_guard.hasActiveWebSessionMarker();
-  if (session != null && authIntentFromUrl == null && isFreshWebSession) {
+  // Always require a fresh login on app startup.
+  // Keep OAuth redirect sessions so the login flow can complete.
+  if (session != null && authIntentFromUrl == null) {
     await client.auth.signOut();
-    session = null;
+    if (kIsWeb) {
+      web_session_guard.clearWebSessionMarker();
+    }
   }
 
   if (kIsWeb) {
     web_session_guard.markWebSessionActive();
   }
 
-  // If user is already authenticated (logged in before), automatically route to dashboard
-  if (session != null) {
-    // User is logged in - route to dashboard for automatic login
-    initialRoute = _dashboardRoute;
-
-    // If this is a Google signup redirect, tag user as admin
-    if (authIntentFromUrl == 'signup') {
-      await client.auth.updateUser(
-        UserAttributes(data: {'role': 'admin', 'signup_method': 'google'}),
-      );
-    }
-  } else {
-    // No session - user must log in
-    initialRoute = _authRoute;
+  // If this is a Google signup redirect, tag user as admin.
+  if (session != null && authIntentFromUrl == 'signup') {
+    await client.auth.updateUser(
+      UserAttributes(data: {'role': 'admin', 'signup_method': 'google'}),
+    );
   }
 
   return _AppBootstrapData(
     initialDarkMode: isDarkMode,
-    initialRoute: initialRoute,
+    initialRoute: _authRoute,
   );
 }
 
@@ -195,15 +173,6 @@ class _WasteCollectionAppState extends State<WasteCollectionApp>
   Future<void> _persistAppState() async {
     web_theme_storage.writeWebThemeMode(_isDarkMode);
     await widget.prefs.setBool(_themePrefKey, _isDarkMode);
-    await widget.prefs.setString(_routePrefKey, _currentRoute);
-  }
-
-  Future<void> _saveRoute(String route) async {
-    if (!_allowedRoutes.contains(route)) {
-      return;
-    }
-    _currentRoute = route;
-    await _persistAppState();
   }
 
   Future<void> _setThemeMode(bool isDarkMode) async {
@@ -237,7 +206,7 @@ class _WasteCollectionAppState extends State<WasteCollectionApp>
       throw const AuthException('Login failed. Please check your credentials.');
     }
 
-    await _saveRoute(_dashboardRoute);
+    _currentRoute = _dashboardRoute;
     _navigatorKey.currentState?.pushNamedAndRemoveUntil(
       _dashboardRoute,
       (route) => false,
@@ -249,7 +218,7 @@ class _WasteCollectionAppState extends State<WasteCollectionApp>
       web_session_guard.clearWebSessionMarker();
     }
     await Supabase.instance.client.auth.signOut();
-    await _saveRoute(_authRoute);
+    _currentRoute = _authRoute;
     _navigatorKey.currentState?.pushNamedAndRemoveUntil(
       _authRoute,
       (route) => false,
@@ -263,9 +232,6 @@ class _WasteCollectionAppState extends State<WasteCollectionApp>
       debugShowCheckedModeBanner: false,
       navigatorKey: _navigatorKey,
       initialRoute: widget.initialRoute,
-      navigatorObservers: [
-        _RoutePersistenceObserver(onRouteChanged: _saveRoute),
-      ],
       themeMode: _isDarkMode ? ThemeMode.dark : ThemeMode.light,
       theme: _buildLightTheme(),
       darkTheme: _buildDarkTheme(),
@@ -318,37 +284,6 @@ class _WasteCollectionAppState extends State<WasteCollectionApp>
         settings: const RouteSettings(name: _authRoute),
       ),
     );
-  }
-}
-
-class _RoutePersistenceObserver extends NavigatorObserver {
-  _RoutePersistenceObserver({required this.onRouteChanged});
-
-  final ValueChanged<String> onRouteChanged;
-
-  void _storeRoute(Route<dynamic>? route) {
-    final routeName = route?.settings.name;
-    if (routeName != null && routeName.isNotEmpty) {
-      onRouteChanged(routeName);
-    }
-  }
-
-  @override
-  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
-    _storeRoute(route);
-    super.didPush(route, previousRoute);
-  }
-
-  @override
-  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
-    _storeRoute(previousRoute);
-    super.didPop(route, previousRoute);
-  }
-
-  @override
-  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
-    _storeRoute(newRoute);
-    super.didReplace(newRoute: newRoute, oldRoute: oldRoute);
   }
 }
 

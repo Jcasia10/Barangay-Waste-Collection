@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:exam/services/admin_dashboard_service.dart';
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({required this.onLogout, super.key});
@@ -14,6 +17,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final AdminDashboardService _service = AdminDashboardService();
   static const int _initialVisibleCount = 3;
   static const double _backToTopOffset = 320;
+  static const Duration _realtimeRefreshDebounceDuration = Duration(
+    milliseconds: 300,
+  );
 
   late Future<List<BarangaySummary>> _barangayFuture;
   late Future<List<CollectionLogItem>> _recentLogsFuture;
@@ -42,13 +48,78 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _showAllReports = false;
   final TextEditingController _reportSearchController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final List<RealtimeChannel> _realtimeChannels = <RealtimeChannel>[];
+  Timer? _realtimeRefreshDebounce;
   bool _showBackToTop = false;
 
   @override
   void initState() {
     super.initState();
     _loadDashboardData();
+    _subscribeToRealtimeChanges();
     _scrollController.addListener(_onScrollChanged);
+  }
+
+  void _subscribeToRealtimeChanges() {
+    const tablesToWatch = <String>[
+      AdminDashboardService.barangayTable,
+      AdminDashboardService.collectionLogsTable,
+      AdminDashboardService.collectionSchedulesTable,
+      AdminDashboardService.wasteReportsTable,
+      AdminDashboardService.usersTable,
+    ];
+
+    for (final table in tablesToWatch) {
+      final channel = Supabase.instance.client.channel('dashboard-$table')
+        ..onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: table,
+          callback: (_) => _scheduleRealtimeRefresh(),
+        )
+        ..subscribe();
+
+      _realtimeChannels.add(channel);
+    }
+
+    final storageBuckets = {
+      ...AdminDashboardService.collectionPhotoBuckets,
+      ...AdminDashboardService.reportPhotoBuckets,
+    };
+
+    for (final bucketId in storageBuckets) {
+      final channel =
+          Supabase.instance.client.channel('dashboard-storage-$bucketId')
+            ..onPostgresChanges(
+              event: PostgresChangeEvent.all,
+              schema: 'storage',
+              table: 'objects',
+              filter: PostgresChangeFilter(
+                type: PostgresChangeFilterType.eq,
+                column: 'bucket_id',
+                value: bucketId,
+              ),
+              callback: (_) => _scheduleRealtimeRefresh(),
+            )
+            ..subscribe();
+
+      _realtimeChannels.add(channel);
+    }
+  }
+
+  void _scheduleRealtimeRefresh() {
+    if (!mounted) {
+      return;
+    }
+
+    _realtimeRefreshDebounce?.cancel();
+    _realtimeRefreshDebounce = Timer(_realtimeRefreshDebounceDuration, () {
+      if (!mounted) {
+        return;
+      }
+
+      setState(_loadDashboardData);
+    });
   }
 
   void _loadDashboardData() {
@@ -70,11 +141,66 @@ class _DashboardScreenState extends State<DashboardScreen> {
     ]);
   }
 
+  Future<void> _openAddBarangaySheet() async {
+    final created = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _AddBarangaySheet(
+        onSave: ({required name, required district, required city}) {
+          return _service.createBarangay(
+            name: name,
+            district: district,
+            city: city,
+          );
+        },
+      ),
+    );
+
+    if (created == true && mounted) {
+      await _reload();
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Barangay added successfully.')),
+      );
+    }
+  }
+
+  Future<void> _openDetailsAndRefresh({
+    required int barangayId,
+    required String barangayName,
+    required String district,
+    required String city,
+  }) async {
+    await Navigator.of(context).pushNamed(
+      '/details',
+      arguments: {
+        'barangayId': barangayId,
+        'barangayName': barangayName,
+        'district': district,
+        'city': city,
+      },
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    await _reload();
+  }
+
   @override
   void dispose() {
     _scrollController
       ..removeListener(_onScrollChanged)
       ..dispose();
+    _realtimeRefreshDebounce?.cancel();
+    for (final channel in _realtimeChannels) {
+      Supabase.instance.client.removeChannel(channel);
+    }
+    _realtimeChannels.clear();
     _barangaySearchController.dispose();
     _logsSearchController.dispose();
     _scheduleSearchController.dispose();
@@ -128,6 +254,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
       appBar: AppBar(
         title: const Text('Waste Collection Dashboard'),
         actions: [
+          IconButton(
+            tooltip: 'Add barangay',
+            onPressed: _openAddBarangaySheet,
+            icon: const Icon(Icons.add_location_alt_outlined),
+          ),
           IconButton(
             tooltip: 'Refresh',
             onPressed: _reload,
@@ -270,14 +401,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       child: _BarangayCompletionCard(
                         summary: barangay,
                         onDetailsPressed: () {
-                          Navigator.of(context).pushNamed(
-                            '/details',
-                            arguments: {
-                              'barangayId': barangay.id,
-                              'barangayName': barangay.name,
-                              'district': barangay.district,
-                              'city': barangay.city,
-                            },
+                          _openDetailsAndRefresh(
+                            barangayId: barangay.id,
+                            barangayName: barangay.name,
+                            district: barangay.district,
+                            city: barangay.city,
                           );
                         },
                       ),
@@ -404,14 +532,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               child: _RecentLogCard(
                                 log: log,
                                 onTap: () {
-                                  Navigator.of(context).pushNamed(
-                                    '/details',
-                                    arguments: {
-                                      'barangayId': log.barangayId,
-                                      'barangayName': log.barangayName,
-                                      'district': log.barangayDistrict,
-                                      'city': log.barangayCity,
-                                    },
+                                  _openDetailsAndRefresh(
+                                    barangayId: log.barangayId,
+                                    barangayName: log.barangayName,
+                                    district: log.barangayDistrict,
+                                    city: log.barangayCity,
                                   );
                                 },
                               ),
@@ -540,14 +665,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               child: _SchedulePreviewCard(
                                 schedule: schedule,
                                 onTap: () {
-                                  Navigator.of(context).pushNamed(
-                                    '/details',
-                                    arguments: {
-                                      'barangayId': schedule.barangayId,
-                                      'barangayName': schedule.barangayName,
-                                      'district': schedule.district,
-                                      'city': schedule.city,
-                                    },
+                                  _openDetailsAndRefresh(
+                                    barangayId: schedule.barangayId,
+                                    barangayName: schedule.barangayName,
+                                    district: schedule.district,
+                                    city: schedule.city,
                                   );
                                 },
                               ),
@@ -676,9 +798,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           )
                         else
                           ...visibleReports.map((report) {
-                            final reportBarangay = report.userBarangayId == null
+                            final reportBarangayId =
+                                report.directBarangayId ??
+                                report.userBarangayId ??
+                                report.scheduleBarangayId;
+                            final reportBarangay = reportBarangayId == null
                                 ? null
-                                : barangayById[report.userBarangayId!];
+                                : barangayById[reportBarangayId];
 
                             return Padding(
                               padding: const EdgeInsets.only(bottom: 10),
@@ -689,14 +815,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 onTap: reportBarangay == null
                                     ? null
                                     : () {
-                                        Navigator.of(context).pushNamed(
-                                          '/details',
-                                          arguments: {
-                                            'barangayId': reportBarangay.id,
-                                            'barangayName': reportBarangay.name,
-                                            'district': reportBarangay.district,
-                                            'city': reportBarangay.city,
-                                          },
+                                        _openDetailsAndRefresh(
+                                          barangayId: reportBarangay.id,
+                                          barangayName: reportBarangay.name,
+                                          district: reportBarangay.district,
+                                          city: reportBarangay.city,
                                         );
                                       },
                               ),
@@ -888,6 +1011,182 @@ class _DashboardMenu extends StatelessWidget {
             },
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _AddBarangaySheet extends StatefulWidget {
+  const _AddBarangaySheet({required this.onSave});
+
+  final Future<void> Function({
+    required String name,
+    required String district,
+    required String city,
+  })
+  onSave;
+
+  @override
+  State<_AddBarangaySheet> createState() => _AddBarangaySheetState();
+}
+
+class _AddBarangaySheetState extends State<_AddBarangaySheet> {
+  final _formKey = GlobalKey<FormState>();
+  final TextEditingController _nameController = TextEditingController();
+  final TextEditingController _districtController = TextEditingController();
+  final TextEditingController _cityController = TextEditingController();
+  bool _isSaving = false;
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _districtController.dispose();
+    _cityController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final form = _formKey.currentState;
+    if (form == null || !form.validate()) {
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+    });
+
+    try {
+      await widget.onSave(
+        name: _nameController.text,
+        district: _districtController.text,
+        city: _cityController.text,
+      );
+      if (!mounted) {
+        return;
+      }
+      Navigator.of(context).pop(true);
+    } on PostgrestException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      final lowerMessage = error.message.toLowerCase();
+      final isRlsError =
+          lowerMessage.contains('row-level security') ||
+          lowerMessage.contains('violates row-level security policy');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            isRlsError
+                ? 'You do not have permission to add a barangay. Ask an admin to update Supabase RLS insert policy for barangay.'
+                : error.message.isNotEmpty
+                ? error.message
+                : 'Unable to create barangay.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Unable to create barangay: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+        });
+      }
+    }
+  }
+
+  String? _requiredText(String? value, String label) {
+    final text = value?.trim() ?? '';
+    if (text.isEmpty) {
+      return '$label is required.';
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final insets = MediaQuery.of(context).viewInsets;
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(16, 8, 16, 16 + insets.bottom),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Add new barangay',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _nameController,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: 'Barangay name',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (value) => _requiredText(value, 'Barangay name'),
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: _districtController,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: 'District',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (value) => _requiredText(value, 'District'),
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: _cityController,
+                textInputAction: TextInputAction.done,
+                onFieldSubmitted: (_) => _submit(),
+                decoration: const InputDecoration(
+                  labelText: 'City',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (value) => _requiredText(value, 'City'),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: _isSaving
+                          ? null
+                          : () => Navigator.of(context).pop(false),
+                      child: const Text('Cancel'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: _isSaving ? null : _submit,
+                      child: _isSaving
+                          ? const SizedBox(
+                              height: 18,
+                              width: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('Add barangay'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

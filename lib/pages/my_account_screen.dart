@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:exam/services/admin_dashboard_service.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -11,12 +13,70 @@ class MyAccountScreen extends StatefulWidget {
 
 class _MyAccountScreenState extends State<MyAccountScreen> {
   final AdminDashboardService _service = AdminDashboardService();
+  static const Duration _realtimeRefreshDebounceDuration = Duration(
+    milliseconds: 300,
+  );
+  final List<RealtimeChannel> _realtimeChannels = <RealtimeChannel>[];
+  Timer? _realtimeRefreshDebounce;
   late Future<CurrentUserProfile> _profileFuture;
 
   @override
   void initState() {
     super.initState();
     _profileFuture = _service.fetchCurrentUserProfile();
+    _subscribeToRealtimeChanges();
+  }
+
+  void _subscribeToRealtimeChanges() {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null) {
+      return;
+    }
+
+    final userChannel = Supabase.instance.client.channel('account-user-$userId')
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.all,
+        schema: 'public',
+        table: AdminDashboardService.usersTable,
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'id',
+          value: userId,
+        ),
+        callback: (_) => _scheduleRealtimeRefresh(),
+      )
+      ..subscribe();
+
+    final barangayChannel =
+        Supabase.instance.client.channel('account-barangay-$userId')
+          ..onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: AdminDashboardService.barangayTable,
+            callback: (_) => _scheduleRealtimeRefresh(),
+          )
+          ..subscribe();
+
+    _realtimeChannels
+      ..add(userChannel)
+      ..add(barangayChannel);
+  }
+
+  void _scheduleRealtimeRefresh() {
+    if (!mounted) {
+      return;
+    }
+
+    _realtimeRefreshDebounce?.cancel();
+    _realtimeRefreshDebounce = Timer(_realtimeRefreshDebounceDuration, () {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _profileFuture = _service.fetchCurrentUserProfile();
+      });
+    });
   }
 
   Future<void> _refresh() async {
@@ -54,6 +114,16 @@ class _MyAccountScreenState extends State<MyAccountScreen> {
         const SnackBar(content: Text('Profile updated successfully.')),
       );
     }
+  }
+
+  @override
+  void dispose() {
+    _realtimeRefreshDebounce?.cancel();
+    for (final channel in _realtimeChannels) {
+      Supabase.instance.client.removeChannel(channel);
+    }
+    _realtimeChannels.clear();
+    super.dispose();
   }
 
   @override

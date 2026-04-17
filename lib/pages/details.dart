@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:exam/services/admin_dashboard_service.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -26,7 +28,11 @@ class _DetailsScreenState extends State<DetailsScreen> {
   final AdminDashboardService _service = AdminDashboardService();
   static const int _initialVisibleCount = 3;
   static const double _backToTopOffset = 320;
-  RealtimeChannel? _schedulesChannel;
+  static const Duration _realtimeRefreshDebounceDuration = Duration(
+    milliseconds: 300,
+  );
+  final List<RealtimeChannel> _realtimeChannels = <RealtimeChannel>[];
+  Timer? _realtimeRefreshDebounce;
   static const List<String> _dayOfWeekOptions = <String>[
     'Monday',
     'Tuesday',
@@ -81,7 +87,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
   void initState() {
     super.initState();
     _reloadData();
-    _subscribeToScheduleChanges();
+    _subscribeToRealtimeChanges();
     _scrollController.addListener(_onScrollChanged);
   }
 
@@ -89,7 +95,10 @@ class _DetailsScreenState extends State<DetailsScreen> {
     _logsFuture = _service.fetchBarangayLogs(widget.barangayId);
     _reportsFuture = _service.fetchResidentReports(widget.barangayId);
     _schedulesFuture = _service.fetchSchedules(widget.barangayId);
-    _collectionPhotosFuture = _service.fetchCollectionPhotos(limit: 8);
+    _collectionPhotosFuture = _service.fetchCollectionPhotos(
+      barangayId: widget.barangayId,
+      limit: 8,
+    );
   }
 
   Future<void> _refreshAll() async {
@@ -158,9 +167,215 @@ class _DetailsScreenState extends State<DetailsScreen> {
     }
   }
 
+  Future<void> _openCollectionLogForm() async {
+    final schedules = await _service.fetchSchedules(widget.barangayId);
+    final remarksController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    DateTime selectedDate = DateTime.now();
+    String selectedStatus = _collectionLogStatuses.first;
+    int? selectedScheduleId;
+
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  16,
+                  8,
+                  16,
+                  16 + MediaQuery.of(context).viewInsets.bottom,
+                ),
+                child: Form(
+                  key: formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Create collection log',
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Collection date'),
+                        subtitle: Text(_formatDate(selectedDate)),
+                        trailing: const Icon(Icons.calendar_today_outlined),
+                        onTap: () async {
+                          final picked = await showDatePicker(
+                            context: context,
+                            initialDate: selectedDate,
+                            firstDate: DateTime(2020),
+                            lastDate: DateTime(2100),
+                          );
+                          if (picked != null) {
+                            setModalState(() {
+                              selectedDate = DateTime(
+                                picked.year,
+                                picked.month,
+                                picked.day,
+                                selectedDate.hour,
+                                selectedDate.minute,
+                              );
+                            });
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      DropdownButtonFormField<int?>(
+                        initialValue: selectedScheduleId,
+                        decoration: const InputDecoration(
+                          labelText: 'Schedule (optional)',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: [
+                          const DropdownMenuItem<int?>(
+                            value: null,
+                            child: Text('No schedule'),
+                          ),
+                          ...schedules.map(
+                            (schedule) => DropdownMenuItem<int?>(
+                              value: schedule.id,
+                              child: Text(
+                                '${schedule.dayOfWeek} • ${schedule.wasteType.isEmpty ? 'Waste type not set' : schedule.wasteType}',
+                              ),
+                            ),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          setModalState(() {
+                            selectedScheduleId = value;
+                          });
+                        },
+                      ),
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedStatus,
+                        decoration: const InputDecoration(
+                          labelText: 'Status',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: _collectionLogStatuses
+                            .map(
+                              (status) => DropdownMenuItem<String>(
+                                value: status,
+                                child: Text(status),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) {
+                          if (value == null) {
+                            return;
+                          }
+                          setModalState(() {
+                            selectedStatus = value;
+                          });
+                        },
+                      ),
+                      const SizedBox(height: 10),
+                      TextFormField(
+                        controller: remarksController,
+                        maxLines: 3,
+                        decoration: const InputDecoration(
+                          labelText: 'Remarks',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: () => Navigator.of(context).pop(false),
+                              child: const Text('Cancel'),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: FilledButton(
+                              onPressed: () async {
+                                final form = formKey.currentState;
+                                if (form == null || !form.validate()) {
+                                  return;
+                                }
+
+                                try {
+                                  await _service.createCollectionLog(
+                                    barangayId: widget.barangayId,
+                                    scheduleId: selectedScheduleId,
+                                    collectionDate: selectedDate,
+                                    status: selectedStatus,
+                                    remarks: remarksController.text,
+                                  );
+                                  if (context.mounted) {
+                                    Navigator.of(context).pop(true);
+                                  }
+                                } on PostgrestException catch (error) {
+                                  if (!context.mounted) {
+                                    return;
+                                  }
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        error.message.isNotEmpty
+                                            ? error.message
+                                            : 'Unable to create collection log.',
+                                      ),
+                                    ),
+                                  );
+                                } catch (error) {
+                                  if (!context.mounted) {
+                                    return;
+                                  }
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        'Unable to create collection log: $error',
+                                      ),
+                                    ),
+                                  );
+                                }
+                              },
+                              child: const Text('Create'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    remarksController.dispose();
+
+    if (saved == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Collection log created successfully.')),
+      );
+      await _refreshLogs();
+      await _refreshCollectionPhotos();
+    }
+  }
+
   Future<void> _refreshCollectionPhotos() async {
     setState(() {
-      _collectionPhotosFuture = _service.fetchCollectionPhotos(limit: 8);
+      _collectionPhotosFuture = _service.fetchCollectionPhotos(
+        barangayId: widget.barangayId,
+        limit: 8,
+      );
     });
     await _collectionPhotosFuture;
   }
@@ -225,28 +440,100 @@ class _DetailsScreenState extends State<DetailsScreen> {
     }
   }
 
-  void _subscribeToScheduleChanges() {
-    final channelName = 'schedules-${widget.barangayId}';
-    _schedulesChannel = Supabase.instance.client.channel(channelName)
-      ..onPostgresChanges(
-        event: PostgresChangeEvent.all,
-        schema: 'public',
-        table: 'collection_schedules',
-        filter: PostgresChangeFilter(
-          type: PostgresChangeFilterType.eq,
-          column: 'barangay_id',
-          value: '${widget.barangayId}',
-        ),
-        callback: (payload) {
-          if (!mounted) {
-            return;
-          }
-          setState(() {
-            _schedulesFuture = _service.fetchSchedules(widget.barangayId);
-          });
-        },
-      )
-      ..subscribe();
+  void _subscribeToRealtimeChanges() {
+    final schedulesChannel =
+        Supabase.instance.client.channel(
+            'details-schedules-${widget.barangayId}',
+          )
+          ..onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: AdminDashboardService.collectionSchedulesTable,
+            filter: PostgresChangeFilter(
+              type: PostgresChangeFilterType.eq,
+              column: 'barangay_id',
+              value: '${widget.barangayId}',
+            ),
+            callback: (_) => _scheduleRealtimeRefresh(),
+          )
+          ..subscribe();
+
+    final logsChannel =
+        Supabase.instance.client.channel('details-logs-${widget.barangayId}')
+          ..onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: AdminDashboardService.collectionLogsTable,
+            filter: PostgresChangeFilter(
+              type: PostgresChangeFilterType.eq,
+              column: 'barangay_id',
+              value: '${widget.barangayId}',
+            ),
+            callback: (_) => _scheduleRealtimeRefresh(),
+          )
+          ..subscribe();
+
+    final reportsChannel =
+        Supabase.instance.client.channel('details-reports-${widget.barangayId}')
+          ..onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: AdminDashboardService.wasteReportsTable,
+            callback: (_) => _scheduleRealtimeRefresh(),
+          )
+          ..subscribe();
+
+    final usersChannel =
+        Supabase.instance.client.channel('details-users-${widget.barangayId}')
+          ..onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: AdminDashboardService.usersTable,
+            callback: (_) => _scheduleRealtimeRefresh(),
+          )
+          ..subscribe();
+
+    final photoStorageChannels = AdminDashboardService.collectionPhotoBuckets
+        .toSet()
+        .map((bucketId) {
+          return Supabase.instance.client.channel(
+              'details-storage-$bucketId-${widget.barangayId}',
+            )
+            ..onPostgresChanges(
+              event: PostgresChangeEvent.all,
+              schema: 'storage',
+              table: 'objects',
+              filter: PostgresChangeFilter(
+                type: PostgresChangeFilterType.eq,
+                column: 'bucket_id',
+                value: bucketId,
+              ),
+              callback: (_) => _scheduleRealtimeRefresh(),
+            )
+            ..subscribe();
+        });
+
+    _realtimeChannels
+      ..add(schedulesChannel)
+      ..add(logsChannel)
+      ..add(reportsChannel)
+      ..add(usersChannel)
+      ..addAll(photoStorageChannels);
+  }
+
+  void _scheduleRealtimeRefresh() {
+    if (!mounted) {
+      return;
+    }
+
+    _realtimeRefreshDebounce?.cancel();
+    _realtimeRefreshDebounce = Timer(_realtimeRefreshDebounceDuration, () {
+      if (!mounted) {
+        return;
+      }
+
+      setState(_reloadData);
+    });
   }
 
   @override
@@ -254,12 +541,14 @@ class _DetailsScreenState extends State<DetailsScreen> {
     _scrollController
       ..removeListener(_onScrollChanged)
       ..dispose();
+    _realtimeRefreshDebounce?.cancel();
+    for (final channel in _realtimeChannels) {
+      Supabase.instance.client.removeChannel(channel);
+    }
+    _realtimeChannels.clear();
     _logsSearchController.dispose();
     _reportsSearchController.dispose();
     _schedulesSearchController.dispose();
-    if (_schedulesChannel != null) {
-      Supabase.instance.client.removeChannel(_schedulesChannel!);
-    }
     super.dispose();
   }
 
@@ -272,6 +561,16 @@ class _DetailsScreenState extends State<DetailsScreen> {
         _showBackToTop = shouldShow;
       });
     }
+  }
+
+  void _handleBackNavigation() {
+    final navigator = Navigator.of(context);
+    if (navigator.canPop()) {
+      navigator.pop();
+      return;
+    }
+
+    navigator.pushNamedAndRemoveUntil('/dashboard', (route) => false);
   }
 
   Future<void> _scrollToTop() async {
@@ -697,7 +996,14 @@ class _DetailsScreenState extends State<DetailsScreen> {
     final theme = Theme.of(context);
 
     return Scaffold(
-      appBar: AppBar(title: Text(widget.barangayName)),
+      appBar: AppBar(
+        leading: IconButton(
+          tooltip: 'Back to dashboard',
+          onPressed: _handleBackNavigation,
+          icon: const Icon(Icons.arrow_back),
+        ),
+        title: Text(widget.barangayName),
+      ),
       floatingActionButton: _showBackToTop
           ? FloatingActionButton.extended(
               onPressed: _scrollToTop,
@@ -718,11 +1024,22 @@ class _DetailsScreenState extends State<DetailsScreen> {
               city: widget.city,
             ),
             const SizedBox(height: 16),
-            Text(
-              'Collection completion and compliance',
-              style: theme.textTheme.titleLarge?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Collection completion and compliance',
+                    style: theme.textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                FilledButton.icon(
+                  onPressed: _openCollectionLogForm,
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add log'),
+                ),
+              ],
             ),
             const SizedBox(height: 10),
             FutureBuilder<List<CollectionLogItem>>(
@@ -1042,7 +1359,7 @@ class _DetailsScreenState extends State<DetailsScreen> {
                     icon: Icons.photo_library_outlined,
                     title: 'No collection photos found',
                     message:
-                        'Add image files to your Supabase storage buckets to display them here.',
+                        'This barangay does not have collection photos yet.',
                   );
                 }
 

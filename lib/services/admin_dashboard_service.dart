@@ -50,11 +50,12 @@ class AdminDashboardService {
 
     final reportCounts = <int, int>{};
     for (final report in reports) {
-      if (report.userBarangayId == null) {
+      final reportBarangayId = _resolveReportBarangayId(report);
+      if (reportBarangayId == null) {
         continue;
       }
-      reportCounts[report.userBarangayId!] =
-          (reportCounts[report.userBarangayId!] ?? 0) + 1;
+      reportCounts[reportBarangayId] =
+          (reportCounts[reportBarangayId] ?? 0) + 1;
     }
 
     final summaries = barangays.map((barangay) {
@@ -110,13 +111,29 @@ class AdminDashboardService {
     final rawRows = await _client
         .from(wasteReportsTable)
         .select(
-          'id, user_id, schedule_id, photo_path, photo_url, latitude, longitude, address_text, description, status, reviewed_by, review_notes, created_at, updated_at, user:users!waste_reports_user_id_fkey(id, full_name, email, phone, role, barangay_id, address, email, phone), schedule:collection_schedules!waste_reports_schedule_id_fkey(id, barangay_id, day_of_week, start_time, end_time, waste_type, notes, is_active)',
+          '*, user:users!waste_reports_user_id_fkey(id, full_name, email, phone, role, barangay_id, address, email, phone), schedule:collection_schedules!waste_reports_schedule_id_fkey(id, barangay_id, day_of_week, start_time, end_time, waste_type, notes, is_active)',
         )
         .order('created_at', ascending: false);
 
-    return _parseResidentReports(
-      rawRows,
-    ).where((report) => report.userBarangayId == barangayId).toList();
+    final reports = _parseResidentReports(rawRows);
+    final schedules = await fetchSchedules(barangayId);
+    final scheduleIds = schedules.map((item) => item.id).toSet();
+
+    return reports.where((report) {
+      final reportBarangayId = _resolveReportBarangayId(report);
+      if (reportBarangayId == barangayId) {
+        return true;
+      }
+
+      final reportScheduleId = report.scheduleId;
+      return reportScheduleId != null && scheduleIds.contains(reportScheduleId);
+    }).toList();
+  }
+
+  int? _resolveReportBarangayId(ResidentReportItem report) {
+    return report.directBarangayId ??
+        report.userBarangayId ??
+        report.scheduleBarangayId;
   }
 
   Future<List<CollectionScheduleItem>> fetchSchedules(int barangayId) async {
@@ -165,7 +182,7 @@ class AdminDashboardService {
     final rawRows = await _client
         .from(wasteReportsTable)
         .select(
-          'id, user_id, schedule_id, photo_path, photo_url, latitude, longitude, address_text, description, status, reviewed_by, review_notes, created_at, updated_at, user:users!waste_reports_user_id_fkey(id, full_name, email, phone, role, barangay_id, address, email, phone), schedule:collection_schedules!waste_reports_schedule_id_fkey(id, barangay_id, day_of_week, start_time, end_time, waste_type, notes, is_active)',
+          '*, user:users!waste_reports_user_id_fkey(id, full_name, email, phone, role, barangay_id, address, email, phone), schedule:collection_schedules!waste_reports_schedule_id_fkey(id, barangay_id, day_of_week, start_time, end_time, waste_type, notes, is_active)',
         )
         .order('created_at', ascending: false)
         .limit(limit);
@@ -272,6 +289,18 @@ class AdminDashboardService {
     return _fetchBarangays();
   }
 
+  Future<void> createBarangay({
+    required String name,
+    required String district,
+    required String city,
+  }) async {
+    await _client.from(barangayTable).insert({
+      'name': name.trim(),
+      'district': district.trim(),
+      'city': city.trim(),
+    });
+  }
+
   Future<String?> resolveReportPhotoUrl(ResidentReportItem report) async {
     if (report.photoUrl.isNotEmpty) {
       return report.photoUrl;
@@ -318,7 +347,22 @@ class AdminDashboardService {
     return null;
   }
 
-  Future<List<String>> fetchCollectionPhotos({int limit = 6}) async {
+  Future<List<String>> fetchCollectionPhotos({
+    required int barangayId,
+    int limit = 6,
+  }) async {
+    final logs = await fetchBarangayLogs(barangayId);
+    final reports = await fetchResidentReports(barangayId);
+
+    final hasCompletedLog = logs.any((log) => log.isCompleted);
+    final hasCompletedReport = reports.any(
+      (report) => _isCompletedResidentReportStatus(report.status),
+    );
+
+    if (!hasCompletedLog || !hasCompletedReport) {
+      return <String>[];
+    }
+
     final photos = <String>[];
 
     for (final bucket in collectionPhotoBuckets) {
@@ -369,6 +413,14 @@ class AdminDashboardService {
     }
 
     return photos;
+  }
+
+  bool _isCompletedResidentReportStatus(String status) {
+    final normalized = status.trim().toLowerCase();
+    return normalized == 'resolved' ||
+        normalized.contains('complete') ||
+        normalized.contains('done') ||
+        normalized.contains('finish');
   }
 
   Future<void> updateSchedule({
@@ -429,6 +481,35 @@ class AdminDashboardService {
         .from(collectionLogsTable)
         .update({'status': status.trim().toLowerCase()})
         .eq('id', logId);
+  }
+
+  Future<void> createCollectionLog({
+    required int barangayId,
+    int? scheduleId,
+    required DateTime collectionDate,
+    required String status,
+    String? remarks,
+  }) async {
+    final currentUserId = _client.auth.currentUser?.id;
+    if (currentUserId == null || currentUserId.isEmpty) {
+      throw const AuthException(
+        'Please log in again before creating a collection log.',
+      );
+    }
+
+    final payload = <String, dynamic>{
+      'barangay_id': barangayId,
+      'collection_date': collectionDate.toIso8601String(),
+      'status': status.trim().toLowerCase(),
+      'remarks': remarks?.trim(),
+      'logged_by': currentUserId,
+    };
+
+    if (scheduleId != null) {
+      payload['schedule_id'] = scheduleId;
+    }
+
+    await _client.from(collectionLogsTable).insert(payload).select('id');
   }
 
   Future<void> updateResidentReportStatus({
@@ -561,7 +642,7 @@ class AdminDashboardService {
     final rawRows = await _client
         .from(wasteReportsTable)
         .select(
-          'id, user_id, schedule_id, photo_path, photo_url, latitude, longitude, address_text, description, status, reviewed_by, review_notes, created_at, updated_at, user:users!waste_reports_user_id_fkey(id, full_name, email, phone, role, barangay_id, address, email, phone), schedule:collection_schedules!waste_reports_schedule_id_fkey(id, barangay_id, day_of_week, start_time, end_time, waste_type, notes, is_active)',
+          '*, user:users!waste_reports_user_id_fkey(id, full_name, email, phone, role, barangay_id, address, email, phone), schedule:collection_schedules!waste_reports_schedule_id_fkey(id, barangay_id, day_of_week, start_time, end_time, waste_type, notes, is_active)',
         )
         .order('created_at', ascending: false);
 
@@ -613,7 +694,10 @@ class AdminDashboardService {
       final schedule = _readMap(row, const ['schedule']);
       return ResidentReportItem(
         id: row['id'],
+        directBarangayId: _readInt(row, const ['barangay_id', 'barangy_id']),
         userBarangayId: _readInt(user, const ['barangay_id']),
+        scheduleBarangayId: _readInt(schedule, const ['barangay_id']),
+        scheduleId: _readInt(row, const ['schedule_id']),
         userId: _readString(row, const ['user_id']),
         residentName: _readString(user, const [
           'full_name',
@@ -981,7 +1065,10 @@ class CollectionLogItem {
 class ResidentReportItem {
   const ResidentReportItem({
     required this.id,
+    required this.directBarangayId,
     required this.userBarangayId,
+    required this.scheduleBarangayId,
+    required this.scheduleId,
     required this.userId,
     required this.residentName,
     required this.email,
@@ -1008,7 +1095,10 @@ class ResidentReportItem {
   });
 
   final dynamic id;
+  final int? directBarangayId;
   final int? userBarangayId;
+  final int? scheduleBarangayId;
+  final int? scheduleId;
   final String userId;
   final String residentName;
   final String email;
